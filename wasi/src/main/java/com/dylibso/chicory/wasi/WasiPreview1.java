@@ -674,6 +674,8 @@ public class WasiPreview1 implements Closeable {
                         return wasiResult(WasiErrno.ENOTDIR);
                     }
 
+                    logger.info("List directory: " + directoryPath);
+                    logger.info("Path class: " + directoryPath.getClass().getName());
                     Memory memory = instance.memory();
                     int used = 0;
                     try (Stream<Path> stream = Files.list(directoryPath)) {
@@ -685,6 +687,10 @@ public class WasiPreview1 implements Closeable {
                             Path entryPath = iterator.next();
                             byte[] name = entryPath.getFileName().toString().getBytes(UTF_8);
                             cookie++;
+                            logger.info(
+                                    String.format(
+                                            "  Entry: %s (length=%d)",
+                                            entryPath.getFileName(), name.length));
 
                             Map<String, Object> attributes;
                             try {
@@ -692,8 +698,10 @@ public class WasiPreview1 implements Closeable {
                             } catch (UnsupportedOperationException e) {
                                 return wasiResult(WasiErrno.ENOTSUP);
                             } catch (NoSuchFileException e) {
+                                logger.info(() -> "  Failed to read attributes", e);
                                 continue;
                             }
+                            logger.info("  Attributes: " + attributes);
 
                             ByteBuffer entry =
                                     ByteBuffer.allocate(24 + name.length)
@@ -720,6 +728,7 @@ public class WasiPreview1 implements Closeable {
                     } catch (IOException e) {
                         return wasiResult(WasiErrno.EIO);
                     }
+                    logger.info("Done listing");
 
                     memory.writeI32(bufUsedPtr, used);
                     return wasiResult(WasiErrno.ESUCCESS);
