@@ -6,12 +6,11 @@ import static java.util.stream.Collectors.toList;
 import static org.apache.maven.plugins.annotations.LifecyclePhase.GENERATE_TEST_SOURCES;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.squareup.javapoet.AnnotationSpec;
-import com.squareup.javapoet.ClassName;
-import com.squareup.javapoet.CodeBlock;
-import com.squareup.javapoet.JavaFile;
-import com.squareup.javapoet.MethodSpec;
-import com.squareup.javapoet.TypeSpec;
+import com.github.javaparser.ast.CompilationUnit;
+import com.github.javaparser.ast.expr.AssignExpr;
+import com.github.javaparser.ast.expr.NameExpr;
+import com.github.javaparser.utils.SourceRoot;
+import com.github.javaparser.utils.StringEscapeUtils;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.FileSystems;
@@ -21,8 +20,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import javax.lang.model.element.Modifier;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.logging.Log;
@@ -41,9 +40,8 @@ import org.eclipse.jgit.errors.ConfigInvalidException;
 @Mojo(name = "wasi-test-gen", defaultPhase = GENERATE_TEST_SOURCES, threadSafe = true)
 public class WasiTestGenMojo extends AbstractMojo {
 
-    private static final ClassName JUNIT_TEST = ClassName.get("org.junit.jupiter.api", "Test");
-    private static final ClassName WASI_TEST_RUNNER =
-            ClassName.get("com.dylibso.chicory.wasi", "WasiTestRunner");
+    private static final String JUNIT_TEST = "org.junit.jupiter.api.Test";
+    private static final String WASI_TEST_RUNNER = "com.dylibso.chicory.wasi.WasiTestRunner";
 
     private final Log log = new SystemStreamLog();
 
@@ -93,6 +91,7 @@ public class WasiTestGenMojo extends AbstractMojo {
         } catch (GitAPIException | ConfigInvalidException | IOException e) {
             throw new MojoExecutionException("Failed to download testsuite: " + e.getMessage(), e);
         }
+        sourceDestinationFolder.mkdirs();
 
         if (testSuiteFiles.getDirectory() == null) {
             testSuiteFiles.setDirectory(testSuiteFolder.getAbsolutePath());
@@ -124,13 +123,32 @@ public class WasiTestGenMojo extends AbstractMojo {
             filesBySuite.computeIfAbsent(suiteName, ignored -> new ArrayList<>()).add(file);
         }
 
+        final SourceRoot dest = new SourceRoot(sourceDestinationFolder.toPath());
         // generate test classes
         for (var entry : filesBySuite.entrySet()) {
             String testSuite = entry.getKey();
             List<File> files = entry.getValue();
 
+            var cu = new CompilationUnit("com.dylibso.chicory.wasi.test");
+            var destFile =
+                    Path.of(
+                            sourceDestinationFolder.getAbsolutePath(),
+                            "com",
+                            "dylibso",
+                            "chicory",
+                            "wasi",
+                            "test",
+                            "Suite" + capitalize(testSuite) + "Test.java");
+            cu.setStorage(destFile);
+
+            cu.addImport(WASI_TEST_RUNNER);
+            cu.addImport("java.io.File");
+            cu.addImport("java.util.List");
+            cu.addImport("java.util.Map");
+            cu.addImport(JUNIT_TEST);
+
             // generate test methods
-            List<MethodSpec> methods = new ArrayList<>();
+            var testClass = cu.addClass("Suite" + capitalize(testSuite) + "Test");
             for (File file : files) {
                 String baseName =
                         file.getName().substring(0, file.getName().length() - ".wasm".length());
@@ -138,49 +156,71 @@ public class WasiTestGenMojo extends AbstractMojo {
                 Specification specification =
                         readSpecification(new File(file.getParentFile(), baseName + ".json"));
 
-                CodeBlock codeBlock =
-                        CodeBlock.builder()
-                                .addStatement(
-                                        "$1T test = new $1T($2S)", File.class, cannonicalFile(file))
-                                .addStatement(
-                                        "List<String> args = $L", listOf(specification.args()))
-                                .addStatement(
-                                        "List<String> dirs = $L", listOf(specification.dirs()))
-                                .addStatement(
-                                        "Map<String, String> env = $L", mapOf(specification.env()))
-                                .addStatement("int exitCode = $L", specification.exitCode())
-                                .addStatement("String stderr = $S", specification.stderr())
-                                .addStatement("String stdout = $S", specification.stdout())
-                                .addStatement(
-                                        "$T.execute($L)",
-                                        WASI_TEST_RUNNER,
-                                        "test, args, dirs, env, exitCode, stderr, stdout")
-                                .build();
+                var method =
+                        testClass.addMethod(
+                                "test" + escapedCamelCase(baseName),
+                                com.github.javaparser.ast.Modifier.Keyword.PUBLIC);
+                method.addAnnotation("Test");
 
-                methods.add(
-                        MethodSpec.methodBuilder("test" + escapedCamelCase(baseName))
-                                .addModifiers(Modifier.PUBLIC)
-                                .returns(void.class)
-                                .addAnnotation(AnnotationSpec.builder(JUNIT_TEST).build())
-                                .addCode(codeBlock)
-                                .build());
+                method.getBody()
+                        .get()
+                        .addStatement(
+                                new AssignExpr(
+                                        new NameExpr("var test"),
+                                        new NameExpr("new File(\"" + relativePath(file) + "\")"),
+                                        AssignExpr.Operator.ASSIGN))
+                        .addStatement(
+                                new AssignExpr(
+                                        new NameExpr("List<String> args"),
+                                        new NameExpr(listOf(specification.args())),
+                                        AssignExpr.Operator.ASSIGN))
+                        .addStatement(
+                                new AssignExpr(
+                                        new NameExpr("List<String> dirs"),
+                                        new NameExpr(listOf(specification.dirs())),
+                                        AssignExpr.Operator.ASSIGN))
+                        .addStatement(
+                                new AssignExpr(
+                                        new NameExpr("Map<String, String> env"),
+                                        new NameExpr(mapOf(specification.env())),
+                                        AssignExpr.Operator.ASSIGN))
+                        .addStatement(
+                                new AssignExpr(
+                                        new NameExpr("var exitCode"),
+                                        new NameExpr(String.valueOf(specification.exitCode())),
+                                        AssignExpr.Operator.ASSIGN))
+                        .addStatement(
+                                new AssignExpr(
+                                        new NameExpr("var stderr"),
+                                        new NameExpr(
+                                                specification.stderr() == null
+                                                        ? "\"\""
+                                                        : "\""
+                                                                + StringEscapeUtils.escapeJava(
+                                                                        specification.stderr())
+                                                                + "\""),
+                                        AssignExpr.Operator.ASSIGN))
+                        .addStatement(
+                                new AssignExpr(
+                                        new NameExpr("var stdout"),
+                                        new NameExpr(
+                                                specification.stdout() == null
+                                                        ? "\"\""
+                                                        : "\""
+                                                                + StringEscapeUtils.escapeJava(
+                                                                        specification.stdout())
+                                                                + "\""),
+                                        AssignExpr.Operator.ASSIGN))
+                        .addStatement(
+                                new NameExpr(
+                                        "WasiTestRunner.execute(test, args, dirs, env, exitCode,"
+                                                + " stderr, stdout)"));
             }
 
-            // write the test class
-            TypeSpec typeSpec =
-                    TypeSpec.classBuilder("Suite" + capitalize(testSuite) + "Test")
-                            .addModifiers(Modifier.PUBLIC)
-                            .addMethods(methods)
-                            .build();
-
-            try {
-                JavaFile.builder("com.dylibso.chicory.test.gen", typeSpec)
-                        .build()
-                        .writeTo(sourceDestinationFolder);
-            } catch (IOException e) {
-                throw new MojoExecutionException("Failed to generate test suite", e);
-            }
+            dest.add(cu);
         }
+        // write the test classes
+        dest.saveAll();
 
         // add generated sources to the project
         project.addTestCompileSourceRoot(sourceDestinationFolder.getAbsolutePath());
@@ -197,29 +237,31 @@ public class WasiTestGenMojo extends AbstractMojo {
         }
     }
 
-    private static CodeBlock listOf(List<String> list) {
-        return CodeBlock.of(
-                "$T.of($L)",
-                List.class,
-                list.stream()
-                        .map(value -> CodeBlock.of("$S", value))
-                        .collect(CodeBlock.joining(", ")));
+    private static String listOf(List<String> list) {
+        return "List.of("
+                + list.stream()
+                        .map(elem -> "\"" + StringEscapeUtils.escapeJava(elem) + "\"")
+                        .collect(Collectors.joining(", "))
+                + ")";
     }
 
-    private static CodeBlock mapOf(Map<String, String> map) {
-        return CodeBlock.of(
-                "$T.of($L)",
-                Map.class,
-                map.entrySet().stream()
-                        .map(entry -> CodeBlock.of("$S, $S", entry.getKey(), entry.getValue()))
-                        .collect(CodeBlock.joining(", ")));
+    private static String mapOf(Map<String, String> map) {
+        return "Map.of("
+                + map.entrySet().stream()
+                        .map(
+                                elem ->
+                                        "\""
+                                                + StringEscapeUtils.escapeJava(elem.getKey())
+                                                + "\", \""
+                                                + StringEscapeUtils.escapeJava(elem.getValue())
+                                                + "\"")
+                        .collect(Collectors.joining(", "))
+                + ")";
     }
 
-    private static File cannonicalFile(File file) throws MojoExecutionException {
-        try {
-            return file.getCanonicalFile();
-        } catch (IOException e) {
-            throw new MojoExecutionException("Failed to canonicalize path: " + file, e);
-        }
+    private String relativePath(File file) throws MojoExecutionException {
+        return file.getAbsolutePath()
+                .replace(project.getBasedir().getAbsolutePath() + File.separator, "")
+                .replace("\\", "\\\\"); // Win compat
     }
 }
