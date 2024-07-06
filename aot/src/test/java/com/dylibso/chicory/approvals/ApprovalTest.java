@@ -1,5 +1,6 @@
 package com.dylibso.chicory.approvals;
 
+import static com.dylibso.chicory.aot.AotCompiler.DEFAULT_CLASS_NAME;
 import static com.dylibso.chicory.aot.AotCompiler.compileModule;
 import static com.dylibso.chicory.wasm.Parser.parse;
 import static java.lang.ClassLoader.getSystemClassLoader;
@@ -7,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.objectweb.asm.Type.getInternalName;
 
 import com.dylibso.chicory.aot.AotMethods;
+import com.dylibso.chicory.wasm.Module;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.Map;
@@ -20,6 +22,13 @@ public class ApprovalTest {
     @Test
     public void verifyBranching() {
         verifyGeneratedBytecode("branching.wat.wasm");
+    }
+
+    @Test
+    public void verifyBranchingHuge() {
+        var module = loadModule("branching.wat.wasm");
+        var result = compileModule(module, DEFAULT_CLASS_NAME, 0);
+        verifyClass(result.classBytes(), true);
     }
 
     @Test
@@ -44,7 +53,7 @@ public class ApprovalTest {
 
     @Test
     public void verifyI32Renamed() {
-        var module = parse(getSystemClassLoader().getResourceAsStream("compiled/i32.wat.wasm"));
+        var module = loadModule("i32.wat.wasm");
         var result = compileModule(module, "FOO");
         verifyClass(result.classBytes(), false);
     }
@@ -74,8 +83,12 @@ public class ApprovalTest {
         verifyGeneratedBytecode("trap.wat.wasm");
     }
 
+    private static Module loadModule(String name) {
+        return parse(getSystemClassLoader().getResourceAsStream("compiled/" + name));
+    }
+
     private static void verifyGeneratedBytecode(String name) {
-        var module = parse(getSystemClassLoader().getResourceAsStream("compiled/" + name));
+        var module = loadModule(name);
         var result = compileModule(module);
         verifyClass(result.classBytes(), true);
     }

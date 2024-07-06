@@ -42,11 +42,13 @@ import static com.dylibso.chicory.aot.AotUtil.emitLongToJvm;
 import static com.dylibso.chicory.aot.AotUtil.emitPop;
 import static com.dylibso.chicory.aot.AotUtil.jvmType;
 import static com.dylibso.chicory.aot.AotUtil.loadTypeOpcode;
+import static com.dylibso.chicory.aot.AotUtil.localContextFieldName;
 import static com.dylibso.chicory.aot.AotUtil.localType;
 import static com.dylibso.chicory.aot.AotUtil.stackSize;
 import static com.dylibso.chicory.aot.AotUtil.storeTypeOpcode;
 import static com.dylibso.chicory.aot.AotUtil.validateArgumentType;
 import static com.dylibso.chicory.wasm.types.Value.REF_NULL_VALUE;
+import static org.objectweb.asm.Type.getDescriptor;
 
 import com.dylibso.chicory.runtime.OpCodeIdentifier;
 import com.dylibso.chicory.wasm.types.AnnotatedInstruction;
@@ -178,16 +180,41 @@ final class AotEmitters {
     }
 
     public static void LOCAL_GET(AotContext ctx, AnnotatedInstruction ins, MethodVisitor asm) {
-        var loadIndex = (int) ins.operand(0);
-        var localType = localType(ctx.getType(), ctx.getBody(), loadIndex);
-        asm.visitVarInsn(loadTypeOpcode(localType), ctx.localSlotIndex(loadIndex));
+        var index = (int) ins.operand(0);
+        var localType = localType(ctx.getType(), ctx.getBody(), index);
+        if (ctx.huge()) {
+            asm.visitVarInsn(Opcodes.ALOAD, ctx.contextSlot());
+            asm.visitFieldInsn(
+                    Opcodes.GETFIELD,
+                    ctx.internalContextClassName(),
+                    localContextFieldName(index),
+                    getDescriptor(jvmType(localType)));
+        } else {
+            asm.visitVarInsn(loadTypeOpcode(localType), ctx.localSlotIndex(index));
+        }
         ctx.pushStackSize(stackSize(jvmType(localType)));
     }
 
     public static void LOCAL_SET(AotContext ctx, AnnotatedInstruction ins, MethodVisitor asm) {
         int index = (int) ins.operand(0);
         var localType = localType(ctx.getType(), ctx.getBody(), index);
-        asm.visitVarInsn(storeTypeOpcode(localType), ctx.localSlotIndex(index));
+        if (ctx.huge()) {
+            asm.visitVarInsn(Opcodes.ALOAD, ctx.contextSlot());
+            if (ctx.peekStackSize() == StackSize.ONE) {
+                asm.visitInsn(Opcodes.SWAP);
+            } else {
+                asm.visitInsn(Opcodes.DUP_X2);
+                asm.visitInsn(Opcodes.POP);
+            }
+            asm.visitFieldInsn(
+                    Opcodes.PUTFIELD,
+                    ctx.internalContextClassName(),
+                    localContextFieldName(index),
+                    getDescriptor(jvmType(localType)));
+
+        } else {
+            asm.visitVarInsn(storeTypeOpcode(localType), ctx.localSlotIndex(index));
+        }
     }
 
     public static void LOCAL_TEE(AotContext ctx, AnnotatedInstruction ins, MethodVisitor asm) {

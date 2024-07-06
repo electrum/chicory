@@ -22,13 +22,16 @@ import java.util.Map;
 final class AotContext {
 
     private final String internalClassName;
+    private final String internalContextClassName;
     private final List<ValueType> globalTypes;
     private final List<FunctionType> functionTypes;
     private final FunctionType[] types;
+    private final boolean huge;
     private final int funcId;
     private final FunctionType type;
     private final FunctionBody body;
     private final List<Integer> slots;
+    private final int contextSlot;
     private final int memorySlot;
     private final int instanceSlot;
     private final int tempSlot;
@@ -38,16 +41,20 @@ final class AotContext {
 
     public AotContext(
             String internalClassName,
+            String internalContextClassName,
             List<ValueType> globalTypes,
             List<FunctionType> functionTypes,
             FunctionType[] types,
+            boolean huge,
             int funcId,
             FunctionType type,
             FunctionBody body) {
         this.internalClassName = internalClassName;
+        this.internalContextClassName = internalContextClassName;
         this.globalTypes = globalTypes;
         this.functionTypes = functionTypes;
         this.types = types;
+        this.huge = huge;
         this.funcId = funcId;
         this.type = type;
         this.body = body;
@@ -57,9 +64,19 @@ final class AotContext {
         int slot = 0;
 
         // WASM arguments
-        for (ValueType param : type.params()) {
-            slots.add(slot);
-            slot += slotCount(param);
+        if (!huge) {
+            for (ValueType param : type.params()) {
+                slots.add(slot);
+                slot += slotCount(param);
+            }
+        }
+
+        // context argument
+        if (huge) {
+            this.contextSlot = slot;
+            slot++;
+        } else {
+            this.contextSlot = -1;
         }
 
         // extra arguments
@@ -69,9 +86,11 @@ final class AotContext {
         slot++;
 
         // WASM locals
-        for (ValueType local : body.localTypes()) {
-            slots.add(slot);
-            slot += slotCount(local);
+        if (!huge) {
+            for (ValueType local : body.localTypes()) {
+                slots.add(slot);
+                slot += slotCount(local);
+            }
         }
 
         this.slots = List.copyOf(slots);
@@ -81,6 +100,10 @@ final class AotContext {
 
     public String internalClassName() {
         return internalClassName;
+    }
+
+    public String internalContextClassName() {
+        return internalContextClassName;
     }
 
     public List<ValueType> globalTypes() {
@@ -93,6 +116,10 @@ final class AotContext {
 
     public FunctionType[] types() {
         return types;
+    }
+
+    public boolean huge() {
+        return huge;
     }
 
     public int getId() {
@@ -109,6 +136,10 @@ final class AotContext {
 
     public int localSlotIndex(int localIndex) {
         return slots.get(localIndex);
+    }
+
+    public int contextSlot() {
+        return contextSlot;
     }
 
     public int memorySlot() {
