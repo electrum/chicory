@@ -234,7 +234,7 @@ public final class AotCompiler {
         emitFunction(
                 classWriter,
                 "call",
-                methodType(long[].class, int.class, long[].class),
+                methodType(long[].class, int.class, long[].class).toMethodDescriptorString(),
                 false,
                 asm -> compileMachineCall(internalClassName, asm));
 
@@ -245,7 +245,7 @@ public final class AotCompiler {
             emitFunction(
                     classWriter,
                     callMethodName(funcId),
-                    CALL_METHOD_TYPE,
+                    CALL_METHOD_TYPE.toMethodDescriptorString(),
                     true,
                     asm -> compileCallFunction(internalClassName, funcId, type, asm));
         }
@@ -257,7 +257,7 @@ public final class AotCompiler {
             emitFunction(
                     classWriter,
                     methodNameFor(funcId),
-                    methodTypeFor(type),
+                    methodTypeFor(type).toMethodDescriptorString(),
                     true,
                     asm -> compileHostFunction(funcId, type, asm));
         }
@@ -271,7 +271,7 @@ public final class AotCompiler {
             emitFunction(
                     classWriter,
                     methodNameFor(funcId),
-                    methodTypeFor(type),
+                    methodTypeFor(type).toMethodDescriptorString(),
                     true,
                     asm -> compileFunction(internalClassName, funcId, type, body, asm));
         }
@@ -284,7 +284,7 @@ public final class AotCompiler {
             emitFunction(
                     classWriter,
                     callIndirectMethodName(typeId),
-                    callIndirectMethodType(type),
+                    callIndirectMethodType(type).toMethodDescriptorString(),
                     true,
                     asm -> compileCallIndirect(internalClassName, typeId, type, asm));
         }
@@ -299,7 +299,7 @@ public final class AotCompiler {
             emitFunction(
                     classWriter,
                     valueMethodName(types),
-                    valueMethodType(types),
+                    valueMethodType(types).toMethodDescriptorString(),
                     true,
                     asm -> {
                         emitBoxArguments(asm, types);
@@ -331,7 +331,7 @@ public final class AotCompiler {
     private static void emitFunction(
             ClassVisitor classWriter,
             String methodName,
-            MethodType methodType,
+            String descriptor,
             boolean isStatic,
             Consumer<MethodVisitor> consumer) {
 
@@ -339,7 +339,7 @@ public final class AotCompiler {
                 classWriter.visitMethod(
                         Opcodes.ACC_PUBLIC | (isStatic ? Opcodes.ACC_STATIC : 0),
                         methodName,
-                        methodType.toMethodDescriptorString(),
+                        descriptor,
                         null,
                         null);
 
