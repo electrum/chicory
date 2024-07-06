@@ -135,6 +135,10 @@ final class AotContext {
         return stackSizes().pop();
     }
 
+    public StackSize peekStackSize() {
+        return stackSizes().getFirst();
+    }
+
     public Deque<Deque<StackSize>> stackSizesStack() {
         return stackSizesStack;
     }
