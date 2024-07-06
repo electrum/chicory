@@ -282,6 +282,10 @@ final class AotUtil {
         return "call_indirect_" + typeId;
     }
 
+    public static String localContextFieldName(int index) {
+        return "local_" + index;
+    }
+
     public static String internalClassName(String name) {
         return name.replace('.', '/');
     }

@@ -23,7 +23,9 @@ import static com.dylibso.chicory.aot.AotUtil.emitJvmToLong;
 import static com.dylibso.chicory.aot.AotUtil.emitLongToJvm;
 import static com.dylibso.chicory.aot.AotUtil.internalClassName;
 import static com.dylibso.chicory.aot.AotUtil.jvmReturnType;
+import static com.dylibso.chicory.aot.AotUtil.jvmType;
 import static com.dylibso.chicory.aot.AotUtil.loadTypeOpcode;
+import static com.dylibso.chicory.aot.AotUtil.localContextFieldName;
 import static com.dylibso.chicory.aot.AotUtil.localType;
 import static com.dylibso.chicory.aot.AotUtil.methodNameFor;
 import static com.dylibso.chicory.aot.AotUtil.methodTypeFor;
@@ -41,6 +43,8 @@ import static org.objectweb.asm.Type.VOID_TYPE;
 import static org.objectweb.asm.Type.getDescriptor;
 import static org.objectweb.asm.Type.getInternalName;
 import static org.objectweb.asm.Type.getMethodDescriptor;
+import static org.objectweb.asm.Type.getObjectType;
+import static org.objectweb.asm.Type.getType;
 
 import com.dylibso.chicory.runtime.Instance;
 import com.dylibso.chicory.runtime.Machine;
@@ -76,6 +80,13 @@ import org.objectweb.asm.util.CheckClassAdapter;
 
 public final class AotCompiler {
 
+    /**
+     * By default, HotSpot does not compile methods that are over 8000 bytes.
+     * Compilation may be forced using the {@code -XX:-DontCompileHugeMethods} flag.
+     * Try to stay under the limit, assuming a 3x expansion factor for WASM to bytecode.
+     */
+    public static final int HUGE_METHOD_SIZE = 2500;
+
     public static final String DEFAULT_CLASS_NAME = "com.dylibso.chicory.$gen.CompiledMachine";
 
     private static final MethodType CALL_METHOD_TYPE =
@@ -83,14 +94,16 @@ public final class AotCompiler {
 
     private final AotClassLoader classLoader = new AotClassLoader();
     private final String className;
+    private final int hugeMethodSize;
     private final Module module;
     private final AotAnalyzer analyzer;
     private final int functionImports;
     private final List<FunctionType> functionTypes;
     private final Map<String, byte[]> extraClasses;
 
-    private AotCompiler(Module module, String className) {
+    private AotCompiler(Module module, String className, int hugeMethodSize) {
         this.className = requireNonNull(className, "className");
+        this.hugeMethodSize = hugeMethodSize;
         this.module = requireNonNull(module, "module");
         this.analyzer = new AotAnalyzer(module);
         this.functionImports = module.importSection().count(ExternalType.FUNCTION);
@@ -103,7 +116,13 @@ public final class AotCompiler {
     }
 
     public static CompilerResult compileModule(Module module, String className) {
-        var compiler = new AotCompiler(module, className);
+        return compileModule(module, className, HUGE_METHOD_SIZE);
+    }
+
+    public static CompilerResult compileModule(
+            Module module, String className, int hugeMethodSize) {
+
+        var compiler = new AotCompiler(module, className, hugeMethodSize);
 
         var bytes = compiler.compileClass(module.functionSection());
         var factory = compiler.createMachineFactory(bytes);
@@ -157,7 +176,60 @@ public final class AotCompiler {
     private Map<String, byte[]> compileExtraClasses() {
         Map<String, byte[]> classes = new LinkedHashMap<>();
         loadExtraClass(classes, createAotMethodsClass(className));
+        compileContextClasses(classes);
         return classes;
+    }
+
+    private void compileContextClasses(Map<String, byte[]> classes) {
+        for (int i = 0; i < module.functionSection().functionCount(); i++) {
+            var funcId = functionImports + i;
+            var type = functionTypes.get(funcId);
+            var body = module.codeSection().getFunctionBody(i);
+
+            if (body.instructions().size() >= hugeMethodSize) {
+                var name = contextClassName(funcId);
+                var bytes = compileContextClass(name, type, body);
+                loadExtraClass(classes, bytes);
+            }
+        }
+    }
+
+    private byte[] compileContextClass(
+            String contextClassName, FunctionType type, FunctionBody body) {
+
+        var classWriter = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
+        classWriter.visit(
+                Opcodes.V11,
+                Opcodes.ACC_PRIVATE | Opcodes.ACC_FINAL,
+                internalClassName(contextClassName),
+                null,
+                getInternalName(Object.class),
+                null);
+
+        classWriter.visitSource("wasm", null);
+        classWriter.visitNestHost(internalClassName(className));
+
+        emitFunction(
+                classWriter,
+                "<init>",
+                getMethodDescriptor(VOID_TYPE),
+                false,
+                asm -> {
+                    emitCallSuper(asm);
+                    asm.visitInsn(Opcodes.RETURN);
+                });
+
+        int localsCount = type.params().size() + body.localTypes().size();
+        for (int i = 0; i < localsCount; i++) {
+            classWriter.visitField(
+                    Opcodes.ACC_PUBLIC,
+                    localContextFieldName(i),
+                    getDescriptor(jvmType(localType(type, body, i))),
+                    null,
+                    null);
+        }
+
+        return classWriter.toByteArray();
     }
 
     private byte[] compileClass(FunctionSection functions) {
@@ -188,7 +260,13 @@ public final class AotCompiler {
                 null,
                 null);
 
-        emitConstructor(classWriter, internalClassName);
+        // constructor
+        emitFunction(
+                classWriter,
+                "<init>",
+                methodType(void.class, Instance.class).toMethodDescriptorString(),
+                false,
+                asm -> compileMachineConstructor(internalClassName, asm));
 
         // Machine.call() implementation
         emitFunction(
@@ -228,12 +306,27 @@ public final class AotCompiler {
             var type = functionTypes.get(funcId);
             var body = module.codeSection().getFunctionBody(i);
 
-            emitFunction(
-                    classWriter,
-                    methodNameFor(funcId),
-                    methodTypeFor(type).toMethodDescriptorString(),
-                    true,
-                    asm -> compileFunction(internalClassName, funcId, type, body, asm));
+            if (body.instructions().size() >= hugeMethodSize) {
+                emitFunction(
+                        classWriter,
+                        methodNameFor(funcId),
+                        methodTypeFor(type).toMethodDescriptorString(),
+                        true,
+                        asm -> compileHugeStub(funcId, type, asm));
+                emitFunction(
+                        classWriter,
+                        hugeOuterMethodName(funcId),
+                        hugeOuterMethodDescriptor(internalContextClassName(funcId), type),
+                        true,
+                        asm -> compileHugeOuter(funcId, type, body, asm));
+            } else {
+                emitFunction(
+                        classWriter,
+                        methodNameFor(funcId),
+                        methodTypeFor(type).toMethodDescriptorString(),
+                        true,
+                        asm -> compileBody(funcId, type, body, asm));
+            }
         }
 
         // call_indirect_xxx() bridges for native CALL_INDIRECT
@@ -246,7 +339,7 @@ public final class AotCompiler {
                     callIndirectMethodName(typeId),
                     callIndirectMethodType(type).toMethodDescriptorString(),
                     true,
-                    asm -> compileCallIndirect(internalClassName, typeId, type, asm));
+                    asm -> compileCallIndirect(typeId, type, asm));
         }
 
         // value_xxx() bridges for multi-value return
@@ -312,34 +405,26 @@ public final class AotCompiler {
         methodWriter.visitEnd();
     }
 
-    private static void emitConstructor(ClassVisitor writer, String internalClassName) {
-        var cons =
-                writer.visitMethod(
-                        Opcodes.ACC_PUBLIC,
-                        "<init>",
-                        methodType(void.class, Instance.class).toMethodDescriptorString(),
-                        null,
-                        null);
-        cons.visitCode();
-
-        // super();
-        cons.visitVarInsn(Opcodes.ALOAD, 0);
-        cons.visitMethodInsn(
+    private static void emitCallSuper(MethodVisitor asm) {
+        asm.visitVarInsn(Opcodes.ALOAD, 0);
+        asm.visitMethodInsn(
                 Opcodes.INVOKESPECIAL,
                 getInternalName(Object.class),
                 "<init>",
                 getMethodDescriptor(VOID_TYPE),
                 false);
+    }
+
+    private static void compileMachineConstructor(String internalClassName, MethodVisitor asm) {
+        emitCallSuper(asm);
 
         // this.instance = instance;
-        cons.visitVarInsn(Opcodes.ALOAD, 0);
-        cons.visitVarInsn(Opcodes.ALOAD, 1);
-        cons.visitFieldInsn(
+        asm.visitVarInsn(Opcodes.ALOAD, 0);
+        asm.visitVarInsn(Opcodes.ALOAD, 1);
+        asm.visitFieldInsn(
                 Opcodes.PUTFIELD, internalClassName, "instance", getDescriptor(Instance.class));
 
-        cons.visitInsn(Opcodes.RETURN);
-        cons.visitMaxs(0, 0);
-        cons.visitEnd();
+        asm.visitInsn(Opcodes.RETURN);
     }
 
     private void compileMachineCall(String internalClassName, MethodVisitor asm) {
@@ -446,8 +531,7 @@ public final class AotCompiler {
         asm.visitInsn(Opcodes.ARETURN);
     }
 
-    private void compileCallIndirect(
-            String internalClassName, int typeId, FunctionType type, MethodVisitor asm) {
+    private void compileCallIndirect(int typeId, FunctionType type, MethodVisitor asm) {
         int slots = type.params().stream().mapToInt(AotUtil::slotCount).sum();
         int funcTableIdx = slots;
         int tableIdx = slots + 1;
@@ -514,7 +598,7 @@ public final class AotCompiler {
 
         for (int i = 0; i < validIds.size(); i++) {
             asm.visitLabel(labels[i]);
-            emitInvokeFunction(asm, internalClassName, keys[i], type);
+            emitInvokeFunction(asm, internalClassName(className), keys[i], type);
             asm.visitInsn(returnTypeOpcode(type));
         }
 
@@ -578,24 +662,76 @@ public final class AotCompiler {
         }
     }
 
-    private void compileFunction(
-            String internalClassName,
-            int funcId,
-            FunctionType type,
-            FunctionBody body,
-            MethodVisitor asm) {
+    private void compileHugeStub(int funcId, FunctionType type, MethodVisitor asm) {
 
+        var internalContextClassName = internalContextClassName(funcId);
+
+        // create context instance
+        asm.visitTypeInsn(Opcodes.NEW, internalContextClassName);
+        asm.visitInsn(Opcodes.DUP);
+        asm.visitMethodInsn(
+                Opcodes.INVOKESPECIAL,
+                internalContextClassName,
+                "<init>",
+                getMethodDescriptor(VOID_TYPE),
+                false);
+
+        // copy parameters to context
+        int slot = 0;
+        List<ValueType> params = type.params();
+        for (int i = 0; i < params.size(); i++) {
+            ValueType param = params.get(i);
+            asm.visitInsn(Opcodes.DUP);
+            asm.visitVarInsn(loadTypeOpcode(param), slot);
+            asm.visitFieldInsn(
+                    Opcodes.PUTFIELD,
+                    internalContextClassName,
+                    localContextFieldName(i),
+                    getDescriptor(jvmType(param)));
+            slot += slotCount(param);
+        }
+
+        // invoke outer method
+        asm.visitVarInsn(Opcodes.ALOAD, slot);
+        asm.visitVarInsn(Opcodes.ALOAD, slot + 1);
+        asm.visitMethodInsn(
+                Opcodes.INVOKESTATIC,
+                internalClassName(className),
+                hugeOuterMethodName(funcId),
+                hugeOuterMethodDescriptor(internalContextClassName, type),
+                false);
+        asm.visitInsn(returnTypeOpcode(type));
+    }
+
+    private void compileHugeOuter(
+            int funcId, FunctionType type, FunctionBody body, MethodVisitor asm) {
         var ctx =
                 new AotContext(
-                        internalClassName,
+                        internalClassName(className),
+                        internalContextClassName(funcId),
                         analyzer.globalTypes(),
                         functionTypes,
                         module.typeSection().types(),
+                        true,
                         funcId,
                         type,
                         body);
 
-        List<AotInstruction> instructions = analyzer.analyze(funcId);
+        compileBody(ctx, asm);
+    }
+
+    private void compileBody(int funcId, FunctionType type, FunctionBody body, MethodVisitor asm) {
+        var ctx =
+                new AotContext(
+                        internalClassName(className),
+                        null,
+                        analyzer.globalTypes(),
+                        functionTypes,
+                        module.typeSection().types(),
+                        false,
+                        funcId,
+                        type,
+                        body);
 
         // initialize local variables to their default values
         int localsCount = type.params().size() + body.localTypes().size();
@@ -604,6 +740,13 @@ public final class AotCompiler {
             asm.visitLdcInsn(defaultValue(localType));
             asm.visitVarInsn(storeTypeOpcode(localType), ctx.localSlotIndex(i));
         }
+
+        compileBody(ctx, asm);
+    }
+
+    private void compileBody(AotContext ctx, MethodVisitor asm) {
+
+        List<AotInstruction> instructions = analyzer.analyze(ctx.funcId());
 
         // allocate labels for all label targets
         Map<Long, Label> labels = new HashMap<>();
@@ -679,6 +822,27 @@ public final class AotCompiler {
                 }
                 emitter.emit(ctx, ins, asm);
         }
+    }
+
+    private String contextClassName(int funcId) {
+        return className + "$Context" + funcId;
+    }
+
+    private String internalContextClassName(int funcId) {
+        return internalClassName(contextClassName(funcId));
+    }
+
+    private static String hugeOuterMethodName(int funcId) {
+        return methodNameFor(funcId) + "_outer";
+    }
+
+    private static String hugeOuterMethodDescriptor(
+            String internalContextClassName, FunctionType type) {
+        return getMethodDescriptor(
+                getType(jvmReturnType(type)),
+                getObjectType(internalContextClassName),
+                getType(Memory.class),
+                getType(Instance.class));
     }
 
     private static String callMethodName(int functId) {
