@@ -228,6 +228,29 @@ public class WasiPreview1Test {
     }
 
     @Test
+    public void shouldRunC2WModule() {
+        /* Preparation:
+         * run the "build-c2w.yaml" GH Action and produce the relevant artifact.
+         * For example, you can download this: https://github.com/andreaTP/chicory/actions/runs/10922065693
+         *
+         */
+        var fakeStdout = new MockPrintStream();
+        var filename = "ubuntu22.c2w.wasm";
+        var args = List.of(filename, "uname", "-a");
+        var wasiOpts = WasiOptions.builder().withArguments(args).withStdout(fakeStdout).build();
+        var wasi = WasiPreview1.builder().withOptions(wasiOpts).build();
+        var imports = ImportValues.builder().addFunction(wasi.toHostFunctions()).build();
+        var module = Parser.parse(new File("../" + filename));
+        var exit =
+                assertThrows(
+                        WasiExitException.class,
+                        () -> Instance.builder(module).withImportValues(imports).build());
+        assertEquals(0, exit.exitCode());
+        System.out.println(fakeStdout.output());
+        assertTrue(fakeStdout.output().startsWith("Linux localhost"));
+    }
+
+    @Test
     public void wasiRandom() {
         var seed = 0x12345678;
         var wasi =
