@@ -206,6 +206,7 @@ public final class AotCompiler {
 
         ClassWriter binaryWriter = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
         ClassVisitor classWriter = aotMethodsRemapper(binaryWriter, className);
+        classWriter = new CheckClassAdapter(classWriter, true);
 
         classWriter.visit(
                 Opcodes.V11,
