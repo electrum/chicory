@@ -135,6 +135,12 @@ final class AotContext {
         return stackSizes().pop();
     }
 
+    public void popStackSizes(int count) {
+        for (int i = 0; i < count; i++) {
+            popStackSize();
+        }
+    }
+
     public StackSize peekStackSize() {
         return stackSizes().getFirst();
     }

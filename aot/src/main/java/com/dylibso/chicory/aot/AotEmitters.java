@@ -607,9 +607,7 @@ final class AotEmitters {
                     // match what is needed for this opcode.
                     emitInvokeStatic(asm, method);
 
-                    for (int i = 0; i < popCount; i++) {
-                        ctx.popStackSize();
-                    }
+                    ctx.popStackSizes(popCount);
                     ctx.pushStackSize(stackSize);
                 };
             }
@@ -622,9 +620,7 @@ final class AotEmitters {
     }
 
     private static void updateStackSize(AotContext ctx, FunctionType functionType) {
-        for (int i = 0; i < functionType.params().size(); i++) {
-            ctx.popStackSize();
-        }
+        ctx.popStackSizes(functionType.params().size());
         for (ValueType type : functionType.returns()) {
             ctx.pushStackSize(stackSize(jvmType(type)));
         }
@@ -675,8 +671,7 @@ final class AotEmitters {
             case I64_STORE16:
             case I64_STORE32:
             case F64_STORE:
-                ctx.popStackSize();
-                ctx.popStackSize();
+                ctx.popStackSizes(2);
                 break;
             case MEMORY_COPY:
             case MEMORY_FILL:
@@ -684,9 +679,7 @@ final class AotEmitters {
             case TABLE_FILL:
             case TABLE_COPY:
             case TABLE_INIT:
-                ctx.popStackSize();
-                ctx.popStackSize();
-                ctx.popStackSize();
+                ctx.popStackSizes(3);
                 break;
             case REF_FUNC:
             case REF_NULL:

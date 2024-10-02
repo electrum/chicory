@@ -796,9 +796,7 @@ public final class AotCompiler {
                     false);
         }
         asm.visitInsn(returnTypeOpcode(type));
-        for (int i = 0; i < type.returns().size(); i++) {
-            ctx.popStackSize();
-        }
+        ctx.popStackSizes(type.returns().size());
     }
 
     private void emitUnwindStack(
