@@ -672,10 +672,8 @@ public final class AotCompiler {
 
             // skip instructions after unconditional control transfer
             if (exitBlockDepth >= 0) {
-                if (ins.depth() > exitBlockDepth) {
-                    continue;
-                }
-                if (ins.opcode() != OpCode.ELSE && ins.opcode() != OpCode.END) {
+                if (ins.depth() > exitBlockDepth
+                        || ins.opcode() != OpCode.ELSE && ins.opcode() != OpCode.END) {
                     continue;
                 }
 
