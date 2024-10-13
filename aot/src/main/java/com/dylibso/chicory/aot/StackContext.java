@@ -1,84 +1,73 @@
 package com.dylibso.chicory.aot;
 
-import static com.dylibso.chicory.aot.AotUtil.jvmType;
-import static com.dylibso.chicory.aot.AotUtil.stackSize;
-
-import com.dylibso.chicory.aot.AotUtil.StackSize;
 import com.dylibso.chicory.wasm.types.FunctionType;
-import com.dylibso.chicory.wasm.types.Instruction;
 import com.dylibso.chicory.wasm.types.ValueType;
 import java.util.ArrayDeque;
 import java.util.Deque;
-import java.util.HashMap;
-import java.util.Map;
 
 final class StackContext {
 
-    private final Deque<Deque<StackSize>> stackSizesStack = new ArrayDeque<>();
-    private final Map<Instruction, Integer> scopeStackSize = new HashMap<>();
-    private final Deque<Deque<StackSize>> restoreStackSize = new ArrayDeque<>();
+    private final Deque<Deque<StackType>> types = new ArrayDeque<>();
+    private final Deque<Deque<StackType>> restore = new ArrayDeque<>();
 
     public StackContext() {
-        this.stackSizesStack.push(new ArrayDeque<>());
+        this.types.push(new ArrayDeque<>());
     }
 
-    public StackSize peekStackSize() {
-        return stackSizes().getFirst();
+    public StackType peek() {
+        return types().getFirst();
     }
 
-    public void pushStackSize(StackSize size) {
-        stackSizes().push(size);
+    public void push(StackType type) {
+        types().push(type);
     }
 
-    public void popStackSize(StackSize expected) {
-        StackSize actual = stackSizes().pop();
+    public void pop(StackType expected) {
+        var actual = types().pop();
         if (expected != actual) {
-            throw new IllegalArgumentException("Expected stack size " + expected + " <> " + actual);
+            throw new IllegalArgumentException("Expected type " + expected + " <> " + actual);
         }
     }
 
-    public void pushStackSizesStack() {
-        stackSizesStack.push(new ArrayDeque<>(stackSizes()));
+    public void pushTypes() {
+        types.push(new ArrayDeque<>(types()));
     }
 
-    public void popStackSizesStack() {
-        stackSizesStack.pop();
+    public void popTypes() {
+        types.pop();
     }
 
-    public void enterScope(Instruction scope, FunctionType scopeType) {
-        scopeStackSize.put(scope, stackSizes().size());
-
+    public void enterScope(FunctionType scopeType) {
         // stack sizes when exiting "polymorphic" blocks after unconditional control transfer
-        Deque<StackSize> stack = new ArrayDeque<>(stackSizes());
+        Deque<StackType> stack = new ArrayDeque<>(types());
         for (int i = 0; i < scopeType.params().size(); i++) {
             stack.pop();
         }
         for (ValueType type : scopeType.returns()) {
-            stack.push(stackSize(jvmType(type)));
+            stack.push(StackType.of(type));
         }
-        restoreStackSize.push(stack);
+        restore.push(stack);
     }
 
-    public void exitScope(Instruction scope) {
-        scopeStackSize.remove(scope);
-        restoreStackSize.pop();
+    public void exitScope() {
+        restore.pop();
     }
 
-    public void scopeRestoreStackSize() {
-        stackSizesStack.pop();
-        stackSizesStack.push(restoreStackSize.getFirst());
+    public void scopeRestore() {
+        types.pop();
+        types.push(restore.getFirst());
     }
 
-    public Deque<StackSize> stackSizes() {
-        return stackSizesStack.getFirst();
+    public Deque<StackType> types() {
+        return types.getFirst();
     }
 
     public void verifyEmpty() {
-        if (stackSizesStack.size() != 1) {
-            throw new RuntimeException("Bad stack sizes stack: " + stackSizesStack);
+        if (types.size() != 1) {
+            throw new RuntimeException("Bad types stack: " + types);
         }
-        if (!stackSizes().isEmpty()) {
-            throw new RuntimeException("Stack sizes not empty: " + stackSizes());
+        if (!types().isEmpty()) {
+            throw new RuntimeException("Types not empty: " + types());
         }
     }
 }
