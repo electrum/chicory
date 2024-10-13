@@ -5,7 +5,6 @@ import static java.util.Collections.reverse;
 import static java.util.stream.Collectors.toUnmodifiableList;
 
 import com.dylibso.chicory.wasm.Module;
-import com.dylibso.chicory.wasm.types.AnnotatedInstruction;
 import com.dylibso.chicory.wasm.types.ExternalType;
 import com.dylibso.chicory.wasm.types.FunctionBody;
 import com.dylibso.chicory.wasm.types.FunctionImport;
@@ -24,15 +23,18 @@ import java.util.stream.Stream;
 
 final class StackAnalyzer {
 
+    private final TypeStack stack = new TypeStack();
     private final Module module;
     private final List<ValueType> globalTypes;
     private final List<FunctionType> functionTypes;
     private final List<ValueType> tableTypes;
     private final FunctionType functionType;
     private final FunctionBody body;
-    private final TypeStack stack = new TypeStack();
 
-    private StackAnalyzer(Module module, int funcId) {
+    private int index = 0;
+    private int exitBlockDepth = -1;
+
+    public StackAnalyzer(Module module, int funcId) {
         this.module = module;
         this.globalTypes = getGlobalTypes(module);
         this.functionTypes = getFunctionTypes(module);
@@ -40,24 +42,27 @@ final class StackAnalyzer {
         this.tableTypes = getTableTypes(module);
         int functionImports = module.importSection().count(ExternalType.FUNCTION);
         this.body = module.codeSection().getFunctionBody(funcId - functionImports);
-        analyze();
-    }
 
-    @SuppressWarnings("ResultOfObjectAllocationIgnored")
-    public static void analyze(Module module, int funcId) {
-        new StackAnalyzer(module, funcId);
-    }
-
-    private void analyze() {
         // implicit block for the function
         stack.enterScope(FunctionType.of(List.of(), functionType.returns()));
+    }
 
-        int exitBlockDepth = -1;
-        for (AnnotatedInstruction ins : body.instructions()) {
-            // skip instructions after unconditional control transfer
-            if (exitBlockDepth >= 0) {
+    public int index() {
+        return index;
+    }
+
+    public boolean hasNext() {
+        return index < body.instructions().size();
+    }
+
+    public void analyze() {
+        // skip instructions after unconditional control transfer
+        if (exitBlockDepth >= 0) {
+            while (hasNext()) {
+                var ins = body.instructions().get(index);
                 if (ins.depth() > exitBlockDepth
                         || ins.opcode() != OpCode.ELSE && ins.opcode() != OpCode.END) {
+                    index++;
                     continue;
                 }
 
@@ -65,57 +70,63 @@ final class StackAnalyzer {
                 if (ins.opcode() == OpCode.END) {
                     stack.scopeRestore();
                 }
-            }
-
-            switch (ins.opcode()) {
-                case NOP:
-                    break;
-                case BLOCK:
-                case LOOP:
-                    stack.enterScope(blockType(ins));
-                    break;
-                case END:
-                    stack.exitScope();
-                    break;
-                case RETURN:
-                    exitBlockDepth = ins.depth();
-                    for (var type : reversed(functionType.returns())) {
-                        stack.pop(type);
-                    }
-                    break;
-                case IF:
-                    stack.pop(ValueType.I32);
-                    stack.enterScope(blockType(ins));
-                    // use the same starting stack sizes for both sides of the branch
-                    if (body.instructions().get(ins.labelFalse() - 1).opcode() == OpCode.ELSE) {
-                        stack.pushTypes();
-                    }
-                    break;
-                case ELSE:
-                    stack.popTypes();
-                    break;
-                case UNREACHABLE:
-                case BR:
-                    exitBlockDepth = ins.depth();
-                    break;
-                case BR_IF:
-                    stack.pop(ValueType.I32);
-                    break;
-                case BR_TABLE:
-                    exitBlockDepth = ins.depth();
-                    stack.pop(ValueType.I32);
-                    break;
-                default:
-                    updateStack(ins);
+                break;
             }
         }
 
-        // implicit return at end of function
-        for (var type : reversed(functionType.returns())) {
-            stack.pop(type);
+        var ins = body.instructions().get(index);
+        switch (ins.opcode()) {
+            case NOP:
+                break;
+            case BLOCK:
+            case LOOP:
+                stack.enterScope(blockType(ins));
+                break;
+            case END:
+                stack.exitScope();
+                break;
+            case RETURN:
+                exitBlockDepth = ins.depth();
+                for (var type : reversed(functionType.returns())) {
+                    stack.pop(type);
+                }
+                break;
+            case IF:
+                stack.pop(ValueType.I32);
+                stack.enterScope(blockType(ins));
+                // use the same starting stack sizes for both sides of the branch
+                if (body.instructions().get(ins.labelFalse() - 1).opcode() == OpCode.ELSE) {
+                    stack.pushTypes();
+                }
+                break;
+            case ELSE:
+                stack.popTypes();
+                break;
+            case UNREACHABLE:
+            case BR:
+                exitBlockDepth = ins.depth();
+                break;
+            case BR_IF:
+                stack.pop(ValueType.I32);
+                break;
+            case BR_TABLE:
+                exitBlockDepth = ins.depth();
+                stack.pop(ValueType.I32);
+                break;
+            default:
+                updateStack(ins);
         }
 
-        stack.verifyEmpty();
+        index++;
+
+        if (!hasNext()) {
+            // implicit return at end of function
+            for (var type : reversed(functionType.returns())) {
+                stack.pop(type);
+            }
+
+            stack.verifyEmpty();
+        }
     }
 
     private void updateStack(Instruction ins) {
