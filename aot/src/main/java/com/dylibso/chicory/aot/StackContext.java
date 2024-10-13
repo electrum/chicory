@@ -7,25 +7,32 @@ import java.util.Deque;
 
 final class StackContext {
 
-    private final Deque<Deque<StackType>> types = new ArrayDeque<>();
-    private final Deque<Deque<StackType>> restore = new ArrayDeque<>();
+    private final Deque<Deque<ValueType>> types = new ArrayDeque<>();
+    private final Deque<Deque<ValueType>> restore = new ArrayDeque<>();
 
     public StackContext() {
         this.types.push(new ArrayDeque<>());
     }
 
-    public StackType peek() {
+    public ValueType peek() {
         return types().getFirst();
     }
 
-    public void push(StackType type) {
+    public void push(ValueType type) {
         types().push(type);
     }
 
-    public void pop(StackType expected) {
+    public void pop(ValueType expected) {
         var actual = types().pop();
         if (expected != actual) {
             throw new IllegalArgumentException("Expected type " + expected + " <> " + actual);
+        }
+    }
+
+    public void popRef() {
+        var actual = types().pop();
+        if (actual != ValueType.FuncRef && actual != ValueType.ExternRef) {
+            throw new IllegalArgumentException("Expected reference type <> " + actual);
         }
     }
 
@@ -39,12 +46,12 @@ final class StackContext {
 
     public void enterScope(FunctionType scopeType) {
         // stack sizes when exiting "polymorphic" blocks after unconditional control transfer
-        Deque<StackType> stack = new ArrayDeque<>(types());
+        Deque<ValueType> stack = new ArrayDeque<>(types());
         for (int i = 0; i < scopeType.params().size(); i++) {
             stack.pop();
         }
         for (ValueType type : scopeType.returns()) {
-            stack.push(StackType.of(type));
+            stack.push(type);
         }
         restore.push(stack);
     }
@@ -58,7 +65,7 @@ final class StackContext {
         types.push(restore.getFirst());
     }
 
-    public Deque<StackType> types() {
+    public Deque<ValueType> types() {
         return types.getFirst();
     }
 

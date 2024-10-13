@@ -13,6 +13,8 @@ import com.dylibso.chicory.wasm.types.Global;
 import com.dylibso.chicory.wasm.types.GlobalImport;
 import com.dylibso.chicory.wasm.types.Instruction;
 import com.dylibso.chicory.wasm.types.OpCode;
+import com.dylibso.chicory.wasm.types.Table;
+import com.dylibso.chicory.wasm.types.TableImport;
 import com.dylibso.chicory.wasm.types.ValueType;
 import java.util.ArrayList;
 import java.util.List;
@@ -24,6 +26,7 @@ final class StackAnalyzer {
     private final Module module;
     private final List<ValueType> globalTypes;
     private final List<FunctionType> functionTypes;
+    private final List<ValueType> tableTypes;
     private final FunctionType functionType;
     private final FunctionBody body;
     private final StackContext ctx = new StackContext();
@@ -33,6 +36,7 @@ final class StackAnalyzer {
         this.globalTypes = getGlobalTypes(module);
         this.functionTypes = getFunctionTypes(module);
         this.functionType = functionTypes.get(funcId);
+        this.tableTypes = getTableTypes(module);
         int functionImports = module.importSection().count(ExternalType.FUNCTION);
         this.body = module.codeSection().getFunctionBody(funcId - functionImports);
         analyze();
@@ -75,17 +79,14 @@ final class StackAnalyzer {
                 case END:
                     ctx.exitScope();
                     break;
-                case UNREACHABLE:
-                    exitBlockDepth = ins.depth();
-                    break;
                 case RETURN:
                     exitBlockDepth = ins.depth();
                     for (var type : reversed(functionType.returns())) {
-                        ctx.pop(StackType.of(type));
+                        ctx.pop(type);
                     }
                     break;
                 case IF:
-                    ctx.pop(StackType.I32);
+                    ctx.pop(ValueType.I32);
                     ctx.enterScope(blockType(ins));
                     // use the same starting stack sizes for both sides of the branch
                     if (body.instructions().get(ins.labelFalse() - 1).opcode() == OpCode.ELSE) {
@@ -95,30 +96,31 @@ final class StackAnalyzer {
                 case ELSE:
                     ctx.popTypes();
                     break;
+                case UNREACHABLE:
                 case BR:
                     exitBlockDepth = ins.depth();
                     break;
                 case BR_IF:
-                    ctx.pop(StackType.I32);
+                    ctx.pop(ValueType.I32);
                     break;
                 case BR_TABLE:
                     exitBlockDepth = ins.depth();
-                    ctx.pop(StackType.I32);
+                    ctx.pop(ValueType.I32);
                     break;
                 default:
-                    updateStackSize(ins);
+                    updateStack(ins);
             }
         }
 
         // implicit return at end of function
         for (var type : reversed(functionType.returns())) {
-            ctx.pop(StackType.of(type));
+            ctx.pop(type);
         }
 
         ctx.verifyEmpty();
     }
 
-    private void updateStackSize(Instruction ins) {
+    private void updateStack(Instruction ins) {
         switch (ins.opcode()) {
             case I32_CLZ:
             case I32_CTZ:
@@ -133,16 +135,16 @@ final class StackAnalyzer {
             case I32_POPCNT:
             case MEMORY_GROW:
                 // [I32] -> [I32]
-                ctx.pop(StackType.I32);
-                ctx.push(StackType.I32);
+                ctx.pop(ValueType.I32);
+                ctx.push(ValueType.I32);
                 break;
             case F32_CONVERT_I32_S:
             case F32_CONVERT_I32_U:
             case F32_LOAD:
             case F32_REINTERPRET_I32:
                 // [I32] -> [F32]
-                ctx.pop(StackType.I32);
-                ctx.push(StackType.F32);
+                ctx.pop(ValueType.I32);
+                ctx.push(ValueType.F32);
                 break;
             case F32_ABS:
             case F32_CEIL:
@@ -152,8 +154,8 @@ final class StackAnalyzer {
             case F32_SQRT:
             case F32_TRUNC:
                 // [F32] -> [F32]
-                ctx.pop(StackType.F32);
-                ctx.push(StackType.F32);
+                ctx.pop(ValueType.F32);
+                ctx.push(ValueType.F32);
                 break;
             case I32_REINTERPRET_F32:
             case I32_TRUNC_F32_S:
@@ -161,33 +163,33 @@ final class StackAnalyzer {
             case I32_TRUNC_SAT_F32_S:
             case I32_TRUNC_SAT_F32_U:
                 // [F32] -> [I32]
-                ctx.pop(StackType.F32);
-                ctx.push(StackType.I32);
+                ctx.pop(ValueType.F32);
+                ctx.push(ValueType.I32);
                 break;
             case I32_WRAP_I64:
             case I64_EQZ:
                 // [I64] -> [I32]
-                ctx.pop(StackType.I64);
-                ctx.push(StackType.I32);
+                ctx.pop(ValueType.I64);
+                ctx.push(ValueType.I32);
                 break;
             case F32_CONVERT_I64_S:
             case F32_CONVERT_I64_U:
                 // [I64] -> [F32]
-                ctx.pop(StackType.I64);
-                ctx.push(StackType.F32);
+                ctx.pop(ValueType.I64);
+                ctx.push(ValueType.F32);
                 break;
             case F32_DEMOTE_F64:
                 // [F64] -> [F32]
-                ctx.pop(StackType.F64);
-                ctx.push(StackType.F32);
+                ctx.pop(ValueType.F64);
+                ctx.push(ValueType.F32);
                 break;
             case I32_TRUNC_F64_S:
             case I32_TRUNC_F64_U:
             case I32_TRUNC_SAT_F64_S:
             case I32_TRUNC_SAT_F64_U:
                 // [F64] -> [I32]
-                ctx.pop(StackType.F64);
-                ctx.push(StackType.I32);
+                ctx.pop(ValueType.F64);
+                ctx.push(ValueType.I32);
                 break;
             case I32_ADD:
             case I32_AND:
@@ -215,9 +217,9 @@ final class StackAnalyzer {
             case I32_SUB:
             case I32_XOR:
                 // [I32 I32] -> [I32]
-                ctx.pop(StackType.I32);
-                ctx.pop(StackType.I32);
-                ctx.push(StackType.I32);
+                ctx.pop(ValueType.I32);
+                ctx.pop(ValueType.I32);
+                ctx.push(ValueType.I32);
                 break;
             case I64_EQ:
             case I64_GE_S:
@@ -230,9 +232,9 @@ final class StackAnalyzer {
             case I64_LT_U:
             case I64_NE:
                 // [I64 I64] -> [I32]
-                ctx.pop(StackType.I64);
-                ctx.pop(StackType.I64);
-                ctx.push(StackType.I32);
+                ctx.pop(ValueType.I64);
+                ctx.pop(ValueType.I64);
+                ctx.push(ValueType.I32);
                 break;
             case F32_ADD:
             case F32_COPYSIGN:
@@ -242,9 +244,9 @@ final class StackAnalyzer {
             case F32_MUL:
             case F32_SUB:
                 // [F32 F32] -> [F32]
-                ctx.pop(StackType.F32);
-                ctx.pop(StackType.F32);
-                ctx.push(StackType.F32);
+                ctx.pop(ValueType.F32);
+                ctx.pop(ValueType.F32);
+                ctx.push(ValueType.F32);
                 break;
             case F32_EQ:
             case F32_GE:
@@ -253,9 +255,9 @@ final class StackAnalyzer {
             case F32_LT:
             case F32_NE:
                 // [F32 F32] -> [I32]
-                ctx.pop(StackType.F32);
-                ctx.pop(StackType.F32);
-                ctx.push(StackType.I32);
+                ctx.pop(ValueType.F32);
+                ctx.pop(ValueType.F32);
+                ctx.push(ValueType.I32);
                 break;
             case F64_EQ:
             case F64_GE:
@@ -264,9 +266,9 @@ final class StackAnalyzer {
             case F64_LT:
             case F64_NE:
                 // [F64 F64] -> [I32]
-                ctx.pop(StackType.F64);
-                ctx.pop(StackType.F64);
-                ctx.push(StackType.I32);
+                ctx.pop(ValueType.F64);
+                ctx.pop(ValueType.F64);
+                ctx.push(ValueType.I32);
                 break;
             case I64_CLZ:
             case I64_CTZ:
@@ -275,8 +277,8 @@ final class StackAnalyzer {
             case I64_EXTEND_8_S:
             case I64_POPCNT:
                 // [I64] -> [I64]
-                ctx.pop(StackType.I64);
-                ctx.push(StackType.I64);
+                ctx.pop(ValueType.I64);
+                ctx.push(ValueType.I64);
                 break;
             case I64_REINTERPRET_F64:
             case I64_TRUNC_F64_S:
@@ -284,8 +286,8 @@ final class StackAnalyzer {
             case I64_TRUNC_SAT_F64_S:
             case I64_TRUNC_SAT_F64_U:
                 // [F64] -> [I64]
-                ctx.pop(StackType.F64);
-                ctx.push(StackType.I64);
+                ctx.pop(ValueType.F64);
+                ctx.push(ValueType.I64);
                 break;
             case F64_TRUNC:
             case F64_SQRT:
@@ -295,15 +297,15 @@ final class StackAnalyzer {
             case F64_FLOOR:
             case F64_NEG:
                 // [F64] -> [F64]
-                ctx.pop(StackType.F64);
-                ctx.push(StackType.F64);
+                ctx.pop(ValueType.F64);
+                ctx.push(ValueType.F64);
                 break;
             case F64_CONVERT_I64_S:
             case F64_CONVERT_I64_U:
             case F64_REINTERPRET_I64:
                 // [I64] -> [F64]
-                ctx.pop(StackType.I64);
-                ctx.push(StackType.F64);
+                ctx.pop(ValueType.I64);
+                ctx.push(ValueType.F64);
                 break;
             case I64_EXTEND_I32_S:
             case I64_EXTEND_I32_U:
@@ -315,28 +317,28 @@ final class StackAnalyzer {
             case I64_LOAD8_U:
             case I64_LOAD:
                 // [I32] -> [I64]
-                ctx.pop(StackType.I32);
-                ctx.push(StackType.I64);
+                ctx.pop(ValueType.I32);
+                ctx.push(ValueType.I64);
                 break;
             case I64_TRUNC_F32_S:
             case I64_TRUNC_F32_U:
             case I64_TRUNC_SAT_F32_S:
             case I64_TRUNC_SAT_F32_U:
                 // [F32] -> [I64]
-                ctx.pop(StackType.F32);
-                ctx.push(StackType.I64);
+                ctx.pop(ValueType.F32);
+                ctx.push(ValueType.I64);
                 break;
             case F64_CONVERT_I32_S:
             case F64_CONVERT_I32_U:
             case F64_LOAD:
                 // [I32] -> [F64]
-                ctx.pop(StackType.I32);
-                ctx.push(StackType.F64);
+                ctx.pop(ValueType.I32);
+                ctx.push(ValueType.F64);
                 break;
             case F64_PROMOTE_F32:
                 // [F32] -> [F64]
-                ctx.pop(StackType.F32);
-                ctx.push(StackType.F64);
+                ctx.pop(ValueType.F32);
+                ctx.push(ValueType.F64);
                 break;
             case I64_ADD:
             case I64_AND:
@@ -354,9 +356,9 @@ final class StackAnalyzer {
             case I64_SUB:
             case I64_XOR:
                 // [I64 I64] -> [I64]
-                ctx.pop(StackType.I64);
-                ctx.pop(StackType.I64);
-                ctx.push(StackType.I64);
+                ctx.pop(ValueType.I64);
+                ctx.pop(ValueType.I64);
+                ctx.push(ValueType.I64);
                 break;
             case F64_ADD:
             case F64_COPYSIGN:
@@ -366,57 +368,57 @@ final class StackAnalyzer {
             case F64_MUL:
             case F64_SUB:
                 // [F64 F64] -> [F64]
-                ctx.pop(StackType.F64);
-                ctx.pop(StackType.F64);
-                ctx.push(StackType.F64);
+                ctx.pop(ValueType.F64);
+                ctx.pop(ValueType.F64);
+                ctx.push(ValueType.F64);
                 break;
             case I32_STORE:
             case I32_STORE8:
             case I32_STORE16:
                 // [I32 I32] -> []
-                ctx.pop(StackType.I32);
-                ctx.pop(StackType.I32);
+                ctx.pop(ValueType.I32);
+                ctx.pop(ValueType.I32);
                 break;
             case F32_STORE:
                 // [I32 F32] -> []
-                ctx.pop(StackType.F32);
-                ctx.pop(StackType.I32);
+                ctx.pop(ValueType.F32);
+                ctx.pop(ValueType.I32);
                 break;
             case I64_STORE:
             case I64_STORE8:
             case I64_STORE16:
             case I64_STORE32:
                 // [I32 I64] -> []
-                ctx.pop(StackType.I64);
-                ctx.pop(StackType.I32);
+                ctx.pop(ValueType.I64);
+                ctx.pop(ValueType.I32);
                 break;
             case F64_STORE:
                 // [I32 F64] -> []
-                ctx.pop(StackType.F64);
-                ctx.pop(StackType.I32);
+                ctx.pop(ValueType.F64);
+                ctx.pop(ValueType.I32);
                 break;
             case I32_CONST:
             case MEMORY_SIZE:
             case TABLE_SIZE:
                 // [] -> [I32]
-                ctx.push(StackType.I32);
+                ctx.push(ValueType.I32);
                 break;
             case F32_CONST:
                 // [] -> [F32]
-                ctx.push(StackType.F32);
+                ctx.push(ValueType.F32);
                 break;
             case I64_CONST:
                 // [] -> [I64]
-                ctx.push(StackType.I64);
+                ctx.push(ValueType.I64);
                 break;
             case F64_CONST:
                 // [] -> [F64]
-                ctx.push(StackType.F64);
+                ctx.push(ValueType.F64);
                 break;
             case SELECT:
             case SELECT_T:
                 // [t t I32] -> [t]
-                ctx.pop(StackType.I32);
+                ctx.pop(ValueType.I32);
                 var selectType = ctx.peek();
                 ctx.pop(selectType);
                 ctx.pop(selectType);
@@ -438,15 +440,18 @@ final class StackAnalyzer {
                 ctx.pop(teeType);
                 ctx.push(teeType);
                 break;
-            case REF_NULL:
             case REF_FUNC:
                 // [] -> [ref]
-                ctx.push(StackType.REF);
+                ctx.push(ValueType.FuncRef);
+                break;
+            case REF_NULL:
+                // [] -> [ref]
+                ctx.push(ValueType.refTypeForId((int) ins.operand(0)));
                 break;
             case REF_IS_NULL:
                 // [ref] -> [I32]
-                ctx.pop(StackType.REF);
-                ctx.push(StackType.I32);
+                ctx.popRef();
+                ctx.push(ValueType.I32);
                 break;
             case MEMORY_COPY:
             case MEMORY_FILL:
@@ -454,60 +459,61 @@ final class StackAnalyzer {
             case TABLE_COPY:
             case TABLE_INIT:
                 // [I32 I32 I32] -> []
-                ctx.pop(StackType.I32);
-                ctx.pop(StackType.I32);
-                ctx.pop(StackType.I32);
+                ctx.pop(ValueType.I32);
+                ctx.pop(ValueType.I32);
+                ctx.pop(ValueType.I32);
                 break;
             case TABLE_FILL:
                 // [I32 ref I32] -> []
-                ctx.pop(StackType.I32);
+                ctx.pop(ValueType.I32);
                 ctx.pop(ctx.peek());
-                ctx.pop(StackType.I32);
+                ctx.pop(ValueType.I32);
                 break;
             case TABLE_GET:
                 // [I32] -> [ref]
-                ctx.pop(StackType.I32);
-                ctx.push(StackType.REF);
+                ctx.pop(ValueType.I32);
+                ctx.push(tableTypes.get((int) ins.operand(0)));
                 break;
             case TABLE_GROW:
                 // [ref I32] -> [I32]
-                ctx.pop(StackType.I32);
-                ctx.pop(StackType.REF);
-                ctx.push(StackType.I32);
+                ctx.pop(ValueType.I32);
+                ctx.pop(tableTypes.get((int) ins.operand(0)));
+                ctx.push(ValueType.I32);
                 break;
             case TABLE_SET:
                 // [I32 ref] -> []
-                ctx.pop(StackType.REF);
-                ctx.pop(StackType.I32);
+                ctx.pop(tableTypes.get((int) ins.operand(0)));
+                ctx.pop(ValueType.I32);
                 break;
             case CALL:
                 // [p*] -> [r*]
-                updateStackSize(functionTypes.get((int) ins.operand(0)));
+                updateStack(functionTypes.get((int) ins.operand(0)));
                 break;
             case CALL_INDIRECT:
                 // [p* I32] -> [r*]
-                ctx.pop(StackType.I32);
-                updateStackSize(module.typeSection().getType((int) ins.operand(0)));
+                ctx.pop(ValueType.I32);
+                updateStack(module.typeSection().getType((int) ins.operand(0)));
                 break;
             case LOCAL_GET:
                 // [] -> [t]
-                ctx.push(StackType.of(localType(functionType, body, (int) ins.operand(0))));
+                ctx.push(localType(functionType, body, (int) ins.operand(0)));
                 break;
             case GLOBAL_GET:
                 // [] -> [t]
-                ctx.push(StackType.of(globalTypes.get((int) ins.operand(0))));
+                ValueType type = globalTypes.get((int) ins.operand(0));
+                ctx.push(type);
                 break;
             default:
                 throw new IllegalArgumentException("Unhandled opcode: " + ins.opcode());
         }
     }
 
-    private void updateStackSize(FunctionType functionType) {
+    private void updateStack(FunctionType functionType) {
         for (ValueType type : reversed(functionType.params())) {
-            ctx.pop(StackType.of(type));
+            ctx.pop(type);
         }
         for (ValueType type : functionType.returns()) {
-            ctx.push(StackType.of(type));
+            ctx.push(type);
         }
     }
 
@@ -519,7 +525,7 @@ final class StackAnalyzer {
         if (ValueType.isValid(typeId)) {
             return FunctionType.returning(ValueType.forId(typeId));
         }
-        return module.typeSection().types()[typeId];
+        return module.typeSection().getType(typeId);
     }
 
     private static List<ValueType> getGlobalTypes(Module module) {
@@ -547,6 +553,22 @@ final class StackAnalyzer {
                         .mapToObj(i -> functions.getFunctionType(i, module.typeSection()));
 
         return Stream.concat(importedFunctions, moduleFunctions).collect(toUnmodifiableList());
+    }
+
+    private static List<ValueType> getTableTypes(Module module) {
+        var importedTables =
+                module.importSection().stream()
+                        .filter(TableImport.class::isInstance)
+                        .map(TableImport.class::cast)
+                        .map(TableImport::entryType);
+
+        var tables = module.tableSection();
+        var moduleTables =
+                IntStream.range(0, tables.tableCount())
+                        .mapToObj(tables::getTable)
+                        .map(Table::elementType);
+
+        return Stream.concat(importedTables, moduleTables).collect(toUnmodifiableList());
     }
 
     private static <T> List<T> reversed(List<T> list) {
