@@ -5,12 +5,12 @@ import com.dylibso.chicory.wasm.types.ValueType;
 import java.util.ArrayDeque;
 import java.util.Deque;
 
-final class StackContext {
+final class TypeStack {
 
     private final Deque<Deque<ValueType>> types = new ArrayDeque<>();
     private final Deque<Deque<ValueType>> restore = new ArrayDeque<>();
 
-    public StackContext() {
+    public TypeStack() {
         this.types.push(new ArrayDeque<>());
     }
 
@@ -45,7 +45,7 @@ final class StackContext {
     }
 
     public void enterScope(FunctionType scopeType) {
-        // stack sizes when exiting "polymorphic" blocks after unconditional control transfer
+        // restored stack when exiting "polymorphic" blocks after unconditional control transfer
         Deque<ValueType> stack = new ArrayDeque<>(types());
         for (int i = 0; i < scopeType.params().size(); i++) {
             stack.pop();
