@@ -1,10 +1,11 @@
 package com.dylibso.chicory.aot;
 
 import static com.dylibso.chicory.aot.AotUtil.localType;
-import static java.util.Collections.reverse;
+import static com.dylibso.chicory.aot.AotUtil.reversed;
 import static java.util.stream.Collectors.toUnmodifiableList;
 
 import com.dylibso.chicory.wasm.Module;
+import com.dylibso.chicory.wasm.types.AnnotatedInstruction;
 import com.dylibso.chicory.wasm.types.ExternalType;
 import com.dylibso.chicory.wasm.types.FunctionBody;
 import com.dylibso.chicory.wasm.types.FunctionImport;
@@ -16,7 +17,6 @@ import com.dylibso.chicory.wasm.types.OpCode;
 import com.dylibso.chicory.wasm.types.Table;
 import com.dylibso.chicory.wasm.types.TableImport;
 import com.dylibso.chicory.wasm.types.ValueType;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -30,8 +30,9 @@ final class StackAnalyzer {
     private final List<ValueType> tableTypes;
     private final FunctionType functionType;
     private final FunctionBody body;
+    private final List<AnnotatedInstruction> instructions;
 
-    private int index = 0;
+    private int index;
     private int exitBlockDepth = -1;
 
     public StackAnalyzer(Module module, int funcId) {
@@ -42,9 +43,22 @@ final class StackAnalyzer {
         this.tableTypes = getTableTypes(module);
         int functionImports = module.importSection().count(ExternalType.FUNCTION);
         this.body = module.codeSection().getFunctionBody(funcId - functionImports);
+        this.instructions = body.instructions();
 
         // implicit block for the function
         stack.enterScope(FunctionType.of(List.of(), functionType.returns()));
+    }
+
+    public void reset() {
+        stack.reset();
+    }
+
+    public List<ValueType> consumed() {
+        return stack.consumed();
+    }
+
+    public List<ValueType> produced() {
+        return stack.produced();
     }
 
     public int index() {
@@ -52,29 +66,13 @@ final class StackAnalyzer {
     }
 
     public boolean hasNext() {
-        return index < body.instructions().size();
+        skip();
+        return index < instructions.size();
     }
 
     public void analyze() {
-        // skip instructions after unconditional control transfer
-        if (exitBlockDepth >= 0) {
-            while (hasNext()) {
-                var ins = body.instructions().get(index);
-                if (ins.depth() > exitBlockDepth
-                        || ins.opcode() != OpCode.ELSE && ins.opcode() != OpCode.END) {
-                    index++;
-                    continue;
-                }
-
-                exitBlockDepth = -1;
-                if (ins.opcode() == OpCode.END) {
-                    stack.scopeRestore();
-                }
-                break;
-            }
-        }
-
-        var ins = body.instructions().get(index);
+        skip();
+        var ins = instructions.get(index);
         switch (ins.opcode()) {
             case NOP:
                 break;
@@ -95,7 +93,7 @@ final class StackAnalyzer {
                 stack.pop(ValueType.I32);
                 stack.enterScope(blockType(ins));
                 // use the same starting stack sizes for both sides of the branch
-                if (body.instructions().get(ins.labelFalse() - 1).opcode() == OpCode.ELSE) {
+                if (instructions.get(ins.labelFalse() - 1).opcode() == OpCode.ELSE) {
                     stack.pushTypes();
                 }
                 break;
@@ -126,6 +124,26 @@ final class StackAnalyzer {
             }
 
             stack.verifyEmpty();
+        }
+    }
+
+    private void skip() {
+        // skip instructions after unconditional control transfer
+        if (exitBlockDepth >= 0) {
+            while (index < instructions.size()) {
+                var ins = instructions.get(index);
+                if (ins.depth() > exitBlockDepth
+                        || (ins.opcode() != OpCode.ELSE && (ins.opcode() != OpCode.END))) {
+                    index++;
+                    continue;
+                }
+
+                exitBlockDepth = -1;
+                if (ins.opcode() == OpCode.END) {
+                    stack.scopeRestore();
+                }
+                break;
+            }
         }
     }
 
@@ -554,7 +572,7 @@ final class StackAnalyzer {
                 module.importSection().stream()
                         .filter(FunctionImport.class::isInstance)
                         .map(FunctionImport.class::cast)
-                        .map(function -> module.typeSection().types()[function.typeIndex()]);
+                        .map(function -> module.typeSection().getType(function.typeIndex()));
 
         var functions = module.functionSection();
         var moduleFunctions =
@@ -578,14 +596,5 @@ final class StackAnalyzer {
                         .map(Table::elementType);
 
         return Stream.concat(importedTables, moduleTables).collect(toUnmodifiableList());
-    }
-
-    private static <T> List<T> reversed(List<T> list) {
-        if (list.size() <= 1) {
-            return list;
-        }
-        List<T> reversed = new ArrayList<>(list);
-        reverse(reversed);
-        return reversed;
     }
 }

@@ -2,6 +2,7 @@ package com.dylibso.chicory.aot;
 
 import static com.dylibso.chicory.wasm.types.Value.REF_NULL_VALUE;
 import static java.lang.invoke.MethodType.methodType;
+import static java.util.Collections.reverse;
 import static org.objectweb.asm.Type.getInternalName;
 import static org.objectweb.asm.Type.getMethodDescriptor;
 
@@ -14,6 +15,7 @@ import com.dylibso.chicory.wasm.types.ValueType;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.List;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
@@ -271,5 +273,14 @@ final class AotUtil {
 
     public static String internalClassName(String name) {
         return name.replace('.', '/');
+    }
+
+    public static <T> List<T> reversed(List<T> list) {
+        if (list.size() <= 1) {
+            return list;
+        }
+        List<T> reversed = new ArrayList<>(list);
+        reverse(reversed);
+        return reversed;
     }
 }

@@ -32,15 +32,19 @@ import static com.dylibso.chicory.aot.AotUtil.localContextFieldName;
 import static com.dylibso.chicory.aot.AotUtil.localType;
 import static com.dylibso.chicory.aot.AotUtil.methodNameFor;
 import static com.dylibso.chicory.aot.AotUtil.methodTypeFor;
+import static com.dylibso.chicory.aot.AotUtil.reversed;
 import static com.dylibso.chicory.aot.AotUtil.slotCount;
 import static com.dylibso.chicory.aot.AotUtil.storeTypeOpcode;
+import static com.dylibso.chicory.wasm.types.AnnotatedInstruction.UNDEFINED_LABEL;
 import static com.dylibso.chicory.wasm.types.Instruction.EMPTY_OPERANDS;
 import static java.lang.invoke.MethodHandleProxies.asInterfaceInstance;
 import static java.lang.invoke.MethodHandles.publicLookup;
 import static java.lang.invoke.MethodType.methodType;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
+import static java.util.function.Function.identity;
 import static java.util.stream.Collectors.joining;
+import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toSet;
 import static java.util.stream.Collectors.toUnmodifiableList;
 import static org.objectweb.asm.Type.VOID_TYPE;
@@ -71,13 +75,17 @@ import java.lang.invoke.MethodType;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.StringJoiner;
 import java.util.TreeMap;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 import org.objectweb.asm.ClassReader;
@@ -87,10 +95,18 @@ import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodTooLargeException;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.commons.InstructionAdapter;
 import org.objectweb.asm.util.CheckClassAdapter;
+import org.objectweb.asm.util.TraceClassVisitor;
 
 public final class AotCompiler {
+
+    private static boolean isDebugFunction(int funcId) {
+        // return funcId == 12;
+        // return true;
+        return funcId != 15;
+    }
 
     /**
      * By default, HotSpot does not compile methods that are over 8000 bytes.
@@ -227,7 +243,8 @@ public final class AotCompiler {
             var type = functionTypes.get(funcId);
             var body = module.codeSection().getFunctionBody(i);
 
-            if (body.instructions().size() >= hugeMethodSize) {
+            if ((body.instructions().size() >= hugeMethodSize && type.returns().size() <= 1)
+                    || isDebugFunction(funcId)) {
                 var name = contextClassName(funcId);
                 var bytes = compileContextClass(name, type, body);
                 loadExtraClass(classes, bytes);
@@ -279,6 +296,12 @@ public final class AotCompiler {
         ClassWriter binaryWriter = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
         ClassVisitor classWriter = aotMethodsRemapper(binaryWriter, className);
         classWriter = new CheckClassAdapter(classWriter, true);
+
+        var printer = new PrintWriter(System.out, false, UTF_8);
+        var textifier = new CustomTextifier();
+        classWriter = new TraceClassVisitor(classWriter, textifier, printer);
+
+        var finalClassWriter = classWriter;
 
         classWriter.visit(
                 Opcodes.V11,
@@ -347,7 +370,13 @@ public final class AotCompiler {
             var type = functionTypes.get(funcId);
             var body = module.codeSection().getFunctionBody(i);
 
-            if (body.instructions().size() >= hugeMethodSize) {
+            var analyzer = new StackAnalyzer(module, funcId);
+            while (analyzer.hasNext()) {
+                analyzer.analyze();
+            }
+
+            if ((body.instructions().size() >= hugeMethodSize && type.returns().size() <= 1)
+                    || isDebugFunction(funcId)) {
                 emitFunction(
                         classWriter,
                         methodNameFor(funcId),
@@ -359,14 +388,14 @@ public final class AotCompiler {
                         hugeOuterMethodName(funcId),
                         hugeOuterMethodDescriptor(internalContextClassName(funcId), type),
                         true,
-                        asm -> compileHugeOuter(funcId, type, body, asm));
+                        asm -> compileHugeOuter(funcId, type, body, finalClassWriter, asm));
             } else {
                 emitFunction(
                         classWriter,
                         methodNameFor(funcId),
                         methodTypeFor(type).toMethodDescriptorString(),
                         true,
-                        asm -> compileBody(funcId, type, body, asm));
+                        asm -> compileBody(funcId, type, body, finalClassWriter, asm));
             }
         }
 
@@ -745,7 +774,11 @@ public final class AotCompiler {
     }
 
     private void compileHugeOuter(
-            int funcId, FunctionType type, FunctionBody body, MethodVisitor asm) {
+            int funcId,
+            FunctionType type,
+            FunctionBody body,
+            ClassVisitor classWriter,
+            MethodVisitor asm) {
         var ctx =
                 new AotContext(
                         internalClassName(className),
@@ -753,15 +786,153 @@ public final class AotCompiler {
                         globalTypes,
                         functionTypes,
                         module.typeSection().types(),
+                        List.of(),
                         true,
                         funcId,
                         type,
                         body);
 
-        compileBody(ctx, type, body, asm);
+        Map<Integer, Set<Integer>> targetSources = new HashMap<>();
+        Map<Integer, Set<Integer>> sourceTargets = new HashMap<>();
+        for (int idx = 0; idx < body.instructions().size(); idx++) {
+            var ins = body.instructions().get(idx);
+            for (int target : labelTargets(ins)) {
+                targetSources.computeIfAbsent(target, x -> new HashSet<>()).add(idx);
+                sourceTargets.computeIfAbsent(idx, x -> new HashSet<>()).add(target);
+            }
+        }
+
+        Map<Integer, Set<Integer>> brTableSources = new HashMap<>();
+        for (int idx = 0; idx < body.instructions().size(); idx++) {
+            var ins = body.instructions().get(idx);
+            if (ins.opcode() == OpCode.BR_TABLE) {
+                for (int target : ins.labelTable()) {
+                    brTableSources.computeIfAbsent(target, x -> new HashSet<>()).add(idx);
+                }
+            }
+        }
+
+        List<Split> splits = new ArrayList<>();
+        if (isDebugFunction(funcId)) {
+            System.out.println("func_" + funcId + " " + type);
+
+            List<SplitRange> splitRanges = new ArrayList<>();
+            boolean newSplit = false;
+            int splitStart = -1;
+            for (int idx = 0; idx < body.instructions().size(); idx++) {
+                var ins = body.instructions().get(idx);
+
+                Set<Integer> sources = brTableSources.get(idx);
+                if (sources != null) {
+                    System.out.println(
+                            "BR_TABLE_SOURCE: "
+                                    + sources.stream()
+                                            .map(body.instructions()::get)
+                                            .map(Instruction::address)
+                                            .map(x -> String.format("0x%08X", x))
+                                            .collect(Collectors.toList()));
+                    newSplit = true;
+                }
+
+                if (newSplit) {
+                    if (splitStart >= 0) {
+                        splitRanges.add(new SplitRange(splitStart, idx));
+                    }
+                    newSplit = false;
+                    splitStart = idx;
+                    if (true) {
+                        System.out.println("==SPLIT==");
+                    }
+                }
+
+                // System.out.println(ins);
+
+                for (int labelTarget : labelTargets(ins)) {
+                    if (body.instructions().get(labelTarget).address() > ins.address()) {
+                        continue;
+                    }
+                    int target = labelTarget - 1;
+                    if (false) {
+                        int address = body.instructions().get(target).address();
+                        System.out.println("TARGET: " + String.format("0x%08X", address));
+                    }
+                    if (target < splitStart) {
+                        throw new ChicoryException("TARGET BEFORE SPLIT");
+                    }
+                }
+            }
+            System.out.println();
+            // if (splitStart >= 0) {
+            //     splitRanges.add(
+            //             new SplitRange(splitStart, body.instructions().size()));
+            // }
+
+            for (SplitRange split : splitRanges) {
+                System.out.println("SPLIT: " + split);
+                for (int idx = split.start(); idx < split.end(); idx++) {
+                    var ins = body.instructions().get(idx);
+                    for (int labelTarget : labelTargets(ins)) {
+                        if (labelTarget < split.start() || labelTarget >= split.end()) {
+                            int targetAddress = body.instructions().get(labelTarget).address();
+                            throw new ChicoryException(
+                                    "TARGET OUTSIDE SPLIT: "
+                                            + String.format("0x%08X", ins.address())
+                                            + " => "
+                                            + String.format("0x%08X", targetAddress));
+                        }
+                    }
+                }
+            }
+            System.out.println();
+
+            var analyzer = new StackAnalyzer(module, funcId);
+            var iterator = splitRanges.iterator();
+            SplitRange split = iterator.hasNext() ? iterator.next() : null;
+            System.out.println("current: " + split);
+            while (true) {
+                if (split != null && analyzer.index() == split.end()) {
+                    splits.add(
+                            new Split(
+                                    split.start(),
+                                    split.end(),
+                                    analyzer.consumed(),
+                                    analyzer.produced()));
+                    System.out.println(splits.get(splits.size() - 1));
+                    split = iterator.hasNext() ? iterator.next() : null;
+                    System.out.println(" current: " + split);
+                }
+                if (!analyzer.hasNext()) {
+                    break;
+                }
+                System.out.printf(
+                        " analyze: %03d %s%n",
+                        analyzer.index(),
+                        body.instructions().get(analyzer.index()).asInstruction());
+                if (split != null && analyzer.index() == split.start()) {
+                    analyzer.reset();
+                }
+                analyzer.analyze();
+            }
+            if (splitRanges.size() != splits.size()) {
+                throw new ChicoryException("SPLIT NOT ANALYZED");
+            }
+        }
+
+        // Start a split point at the first instruction, or after an unconditional control transfer.
+        // If the instruction is the target of a label that is not within the current split point,
+        // start a new split point before the instruction.
+        // In other words, end the split point before the target label or after an unconditional
+        // control transfer.
+
+        compileBody(ctx, type, body, splits, classWriter, asm);
     }
 
-    private void compileBody(int funcId, FunctionType type, FunctionBody body, MethodVisitor asm) {
+    private void compileBody(
+            int funcId,
+            FunctionType type,
+            FunctionBody body,
+            ClassVisitor classWriter,
+            MethodVisitor asm) {
         var ctx =
                 new AotContext(
                         internalClassName(className),
@@ -769,6 +940,7 @@ public final class AotCompiler {
                         globalTypes,
                         functionTypes,
                         module.typeSection().types(),
+                        type.params(),
                         false,
                         funcId,
                         type,
@@ -782,23 +954,24 @@ public final class AotCompiler {
             asm.visitVarInsn(storeTypeOpcode(localType), ctx.localSlotIndex(i));
         }
 
-        compileBody(ctx, type, body, asm);
+        compileBody(ctx, type, body, List.of(), classWriter, asm);
     }
 
     private void compileBody(
-            AotContext ctx, FunctionType type, FunctionBody body, MethodVisitor asm) {
+            AotContext ctx,
+            FunctionType type,
+            FunctionBody body,
+            List<Split> splits,
+            ClassVisitor classWriter,
+            MethodVisitor asm) {
+
+        Map<Integer, Split> splitStarts = splits.stream().collect(toMap(Split::start, identity()));
 
         // allocate labels for all label targets
         Map<Integer, Label> labels = new HashMap<>();
         for (AnnotatedInstruction ins : body.instructions()) {
-            if (ins.labelTrue() != AnnotatedInstruction.UNDEFINED_LABEL) {
-                labels.put(ins.labelTrue(), new Label());
-            }
-            if (ins.labelFalse() != AnnotatedInstruction.UNDEFINED_LABEL) {
-                labels.put(ins.labelFalse(), new Label());
-            }
-            for (int label : ins.labelTable()) {
-                labels.put(label, new Label());
+            for (Integer target : labelTargets(ins)) {
+                labels.put(target, new Label());
             }
         }
 
@@ -809,16 +982,85 @@ public final class AotCompiler {
         int exitBlockDepth = -1;
         for (int idx = 0; idx < body.instructions().size(); idx++) {
             var ins = body.instructions().get(idx);
+            if (isDebugFunction(ctx.funcId())) {
+                System.out.printf("  %04d %s <= %s%n", idx, ins, ctx.stackSizes());
+            }
 
             Label label = labels.get(idx);
             if (label != null) {
                 asm.visitLabel(label);
             }
 
+            // compile inner method if this is the start of a split
+            if (splitStarts.containsKey(idx)) {
+                Split split = splitStarts.get(idx);
+                idx = split.end() - 1;
+
+                System.out.println();
+                System.out.println(">>>>> INNER >>>>>");
+                System.out.println(split);
+                AotContext innerCtx = ctx.copyForInner(split.consumed());
+                emitFunction(
+                        classWriter,
+                        hugeInnerMethodName(ctx.funcId(), split),
+                        hugeInnerMethodDescriptor(internalContextClassName(ctx.funcId()), split),
+                        true,
+                        methodWriter ->
+                                compileHugeInnerBody(innerCtx, type, body, split, methodWriter));
+                System.out.println("<<<<<<<<<<<<<<<<<");
+                System.out.println();
+
+                asm.visitVarInsn(Opcodes.ALOAD, ctx.contextSlot());
+                asm.visitVarInsn(Opcodes.ALOAD, ctx.memorySlot());
+                asm.visitVarInsn(Opcodes.ALOAD, ctx.instanceSlot());
+                asm.visitMethodInsn(
+                        Opcodes.INVOKESTATIC,
+                        ctx.internalClassName(),
+                        hugeInnerMethodName(ctx.funcId(), split),
+                        hugeInnerMethodDescriptor(internalContextClassName(ctx.funcId()), split),
+                        false);
+
+                // if (result[0] == -1) return result;
+                asm.visitInsn(Opcodes.DUP);
+                asm.visitVarInsn(Opcodes.ASTORE, ctx.tempSlot());
+                asm.visitLdcInsn(0);
+                asm.visitInsn(Opcodes.LALOAD);
+                Label end = new Label();
+                asm.visitInsn(Opcodes.L2I);
+                asm.visitLdcInsn(-1);
+                asm.visitJumpInsn(Opcodes.IF_ICMPNE, end);
+                if (type.returns().isEmpty()) {
+                    asm.visitInsn(Opcodes.RETURN);
+                } else {
+                    if (type.returns().size() > 1) {
+                        throw new ChicoryException("Multi-value return not supported");
+                    }
+                    asm.visitVarInsn(Opcodes.ALOAD, ctx.tempSlot());
+                    asm.visitLdcInsn(1);
+                    asm.visitInsn(Opcodes.LALOAD);
+                    emitLongToJvm(asm, type.returns().get(0));
+                    asm.visitInsn(returnTypeOpcode(type));
+                }
+                asm.visitLabel(end);
+
+                // if (result[0] > 0) goto label;
+
+                // push the produced values onto the stack
+                var produced = split.produced();
+                for (int i = 0; i < produced.size(); i++) {
+                    asm.visitVarInsn(Opcodes.ALOAD, ctx.tempSlot());
+                    asm.visitLdcInsn(i + 1);
+                    asm.visitInsn(Opcodes.LALOAD);
+                    emitLongToJvm(asm, produced.get(i));
+                }
+
+                continue;
+            }
+
             // skip instructions after unconditional control transfer
             if (exitBlockDepth >= 0) {
                 if (ins.depth() > exitBlockDepth
-                        || ins.opcode() != OpCode.ELSE && ins.opcode() != OpCode.END) {
+                        || (ins.opcode() != OpCode.ELSE && ins.opcode() != OpCode.END)) {
                     continue;
                 }
 
@@ -930,6 +1172,211 @@ public final class AotCompiler {
         }
     }
 
+    private void compileHugeInnerBody(
+            AotContext ctx, FunctionType type, FunctionBody body, Split split, MethodVisitor asm) {
+
+        // push parameters onto the stack
+        for (int i = 0; i < split.consumed().size(); i++) {
+            var param = split.consumed().get(i);
+            asm.visitVarInsn(loadTypeOpcode(param), ctx.localSlotIndex(i));
+        }
+
+        // range of instructions to compile
+        int startIdx = split.start();
+        int endIdx = split.end();
+
+        // allocate labels for all label targets
+        Map<Integer, Label> labels = new HashMap<>();
+        for (int idx = startIdx; idx < endIdx; idx++) {
+            var ins = body.instructions().get(idx);
+            for (Integer target : labelTargets(ins)) {
+                labels.put(target, new Label());
+            }
+        }
+
+        // fake instruction to use for the function's implicit block
+        ctx.enterScope(FUNCTION_SCOPE, FunctionType.of(List.of(), type.returns()));
+
+        // compile the function body
+        int exitBlockDepth = -1;
+        for (int idx = startIdx; idx < endIdx; idx++) {
+            var ins = body.instructions().get(idx);
+            if (isDebugFunction(ctx.funcId())) {
+                System.out.printf("  %04d %s <= %s%n", idx, ins, ctx.stackSizes());
+            }
+
+            Label label = labels.get(idx);
+            if (label != null) {
+                asm.visitLabel(label);
+            }
+
+            // skip the first instruction of the split
+            if (idx == startIdx) {
+                if (ins.opcode() != OpCode.END) {
+                    throw new ChicoryException("Unexpected split start: " + ins);
+                }
+                continue;
+            }
+
+            // skip instructions after unconditional control transfer
+            if (exitBlockDepth >= 0) {
+                if (ins.depth() > exitBlockDepth
+                        || (ins.opcode() != OpCode.ELSE && ins.opcode() != OpCode.END)) {
+                    continue;
+                }
+
+                exitBlockDepth = -1;
+                if (ins.opcode() == OpCode.END) {
+                    ctx.scopeRestoreStackSize();
+                }
+            }
+
+            switch (ins.opcode()) {
+                case NOP:
+                    break;
+                case BLOCK:
+                case LOOP:
+                    ctx.enterScope(ins.scope(), blockType(ins));
+                    break;
+                case END:
+                    ctx.exitScope(ins.scope());
+                    break;
+                case UNREACHABLE:
+                    exitBlockDepth = ins.depth();
+                    emitInvokeStatic(asm, THROW_TRAP_EXCEPTION);
+                    asm.visitInsn(Opcodes.ATHROW);
+                    break;
+                case RETURN:
+                    exitBlockDepth = ins.depth();
+                    // TODO: emitHugeReturn()
+                    // return { status, ...values }
+                    // -1 = return
+                    // 0 = continue
+                    // 1+ = jump to label
+                    // return new { -1L, value }
+                    if (type.returns().isEmpty()) {
+                        asm.visitLdcInsn(1);
+                        asm.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_LONG);
+                        asm.visitInsn(Opcodes.DUP);
+                        asm.visitLdcInsn(0);
+                        asm.visitLdcInsn(-1L);
+                        asm.visitInsn(Opcodes.LASTORE);
+                    } else {
+                        var returnType = type.returns().get(0);
+                        asm.visitVarInsn(storeTypeOpcode(returnType), ctx.tempSlot());
+                        asm.visitLdcInsn(2);
+                        asm.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_LONG);
+                        asm.visitInsn(Opcodes.DUP);
+                        asm.visitLdcInsn(0);
+                        asm.visitLdcInsn(-1L);
+                        asm.visitInsn(Opcodes.LASTORE);
+                        asm.visitInsn(Opcodes.DUP);
+                        asm.visitLdcInsn(1);
+                        asm.visitVarInsn(loadTypeOpcode(returnType), ctx.tempSlot());
+                        emitJvmToLong(asm, returnType);
+                        asm.visitInsn(Opcodes.LASTORE);
+                    }
+                    asm.visitInsn(Opcodes.ARETURN);
+                    ctx.popStackSizes(type.returns().size());
+                    break;
+                case IF:
+                    ctx.popStackSize();
+                    ctx.enterScope(ins.scope(), blockType(ins));
+                    asm.visitJumpInsn(Opcodes.IFEQ, labels.get(ins.labelFalse()));
+                    // use the same starting stack sizes for both sides of the branch
+                    if (body.instructions().get(ins.labelFalse() - 1).opcode() == OpCode.ELSE) {
+                        ctx.pushStackSizesStack();
+                    }
+                    break;
+                case ELSE:
+                    asm.visitJumpInsn(Opcodes.GOTO, labels.get(ins.labelTrue()));
+                    ctx.popStackSizesStack();
+                    break;
+                case BR:
+                    exitBlockDepth = ins.depth();
+                    if (ins.labelTrue() < idx) {
+                        emitInvokeStatic(asm, CHECK_INTERRUPTION);
+                    }
+                    emitUnwindStack(asm, type, body, ins, ins.labelTrue(), ctx);
+                    asm.visitJumpInsn(Opcodes.GOTO, labels.get(ins.labelTrue()));
+                    break;
+                case BR_IF:
+                    ctx.popStackSize();
+                    Label falseLabel = new Label();
+                    asm.visitJumpInsn(Opcodes.IFEQ, falseLabel);
+                    if (ins.labelTrue() < idx) {
+                        emitInvokeStatic(asm, CHECK_INTERRUPTION);
+                    }
+                    emitUnwindStack(asm, type, body, ins, ins.labelTrue(), ctx);
+                    asm.visitJumpInsn(Opcodes.GOTO, labels.get(ins.labelTrue()));
+                    asm.visitLabel(falseLabel);
+                    break;
+                case BR_TABLE:
+                    exitBlockDepth = ins.depth();
+                    ctx.popStackSize();
+                    emitInvokeStatic(asm, CHECK_INTERRUPTION);
+                    // skip table switch if it only has a default
+                    if (ins.labelTable().size() == 1) {
+                        asm.visitInsn(Opcodes.POP);
+                        emitUnwindStack(asm, type, body, ins, ins.labelTable().get(0), ctx);
+                        asm.visitJumpInsn(Opcodes.GOTO, labels.get(ins.labelTable().get(0)));
+                        break;
+                    }
+                    // collect unique target labels
+                    Map<Integer, Label> targets = new HashMap<>();
+                    Label[] table = new Label[ins.labelTable().size() - 1];
+                    for (int i = 0; i < table.length; i++) {
+                        table[i] =
+                                targets.computeIfAbsent(ins.labelTable().get(i), x -> new Label());
+                    }
+                    // table switch using the last entry of the label table as the default
+                    int defaultTarget = ins.labelTable().get(ins.labelTable().size() - 1);
+                    Label defaultLabel = targets.computeIfAbsent(defaultTarget, x -> new Label());
+                    asm.visitTableSwitchInsn(0, table.length - 1, defaultLabel, table);
+                    // generate separate unwinds for each target
+                    targets.forEach(
+                            (target, tableLabel) -> {
+                                asm.visitLabel(tableLabel);
+                                emitUnwindStack(asm, type, body, ins, target, ctx);
+                                asm.visitJumpInsn(Opcodes.GOTO, labels.get(target));
+                            });
+                    break;
+                default:
+                    var emitter = EMITTERS.get(ins.opcode());
+                    if (emitter == null) {
+                        throw new ChicoryException(
+                                "JVM compilation failed: opcode is not supported: " + ins.opcode());
+                    }
+                    emitter.emit(ctx, ins, asm);
+            }
+        }
+
+        if (exitBlockDepth == -1) {
+            asm.visitInsn(Opcodes.ACONST_NULL);
+            asm.visitInsn(Opcodes.ARETURN);
+            ctx.popStackSizes(split.produced().size());
+        }
+
+        if (ctx.stackSizesStack().size() != 1) {
+            throw new RuntimeException("Bad stack sizes stack: " + ctx.stackSizesStack());
+        }
+        if (!ctx.stackSizes().isEmpty()) {
+            throw new RuntimeException("Stack sizes not empty: " + ctx.stackSizes());
+        }
+    }
+
+    private static List<Integer> labelTargets(AnnotatedInstruction ins) {
+        List<Integer> targets = new ArrayList<>();
+        if (ins.labelTrue() != UNDEFINED_LABEL) {
+            targets.add(ins.labelTrue());
+        }
+        if (ins.labelFalse() != UNDEFINED_LABEL) {
+            targets.add(ins.labelFalse());
+        }
+        targets.addAll(ins.labelTable());
+        return targets;
+    }
+
     private static void emitReturn(MethodVisitor asm, FunctionType type, AotContext ctx) {
         if (type.returns().size() > 1) {
             asm.visitMethodInsn(
@@ -1037,6 +1484,21 @@ public final class AotCompiler {
                 getType(Instance.class));
     }
 
+    private static String hugeInnerMethodName(int funcId, Split split) {
+        return methodNameFor(funcId) + "_inner_" + split.start() + "_" + split.end();
+    }
+
+    private static String hugeInnerMethodDescriptor(String internalContextClassName, Split split) {
+        List<Type> parameters = new ArrayList<>(split.consumed().size() + 3);
+        for (var param : reversed(split.consumed())) {
+            parameters.add(getType(jvmType(param)));
+        }
+        parameters.add(getObjectType(internalContextClassName));
+        parameters.add(getType(Memory.class));
+        parameters.add(getType(Instance.class));
+        return getMethodDescriptor(getType(long[].class), parameters.toArray(new Type[0]));
+    }
+
     public static String callMethodName(int functId) {
         return "call_" + functId;
     }
@@ -1073,5 +1535,68 @@ public final class AotCompiler {
             return Opcodes.RETURN;
         }
         throw new ChicoryException("Unsupported return type: " + returnType.getName());
+    }
+
+    private static class SplitRange {
+        private final int start;
+        private final int end;
+
+        public SplitRange(int start, int end) {
+            this.start = start;
+            this.end = end;
+        }
+
+        public int start() {
+            return start;
+        }
+
+        public int end() {
+            return end;
+        }
+
+        @Override
+        public String toString() {
+            return "[" + start + ", " + end + "]";
+        }
+    }
+
+    private static class Split {
+        private final int start;
+        private final int end;
+        private final List<ValueType> consumed;
+        private final List<ValueType> produced;
+
+        public Split(int start, int end, List<ValueType> consumed, List<ValueType> produced) {
+            this.start = start;
+            this.end = end;
+            this.consumed = consumed;
+            this.produced = produced;
+        }
+
+        public int start() {
+            return start;
+        }
+
+        public int end() {
+            return end;
+        }
+
+        public List<ValueType> consumed() {
+            return consumed;
+        }
+
+        public List<ValueType> produced() {
+            return produced;
+        }
+
+        @Override
+        public String toString() {
+            return new StringJoiner(", ", "Split{", "}")
+                    .add("start=" + start)
+                    .add("end=" + end)
+                    .add("consumed=" + consumed)
+                    .add("produced=" + produced)
+                    .toString();
+        }
     }
 }

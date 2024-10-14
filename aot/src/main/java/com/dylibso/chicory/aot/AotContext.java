@@ -45,6 +45,7 @@ final class AotContext {
             List<ValueType> globalTypes,
             List<FunctionType> functionTypes,
             FunctionType[] types,
+            List<ValueType> paramTypes,
             boolean huge,
             int funcId,
             FunctionType type,
@@ -64,11 +65,9 @@ final class AotContext {
         int slot = 0;
 
         // WASM arguments
-        if (!huge) {
-            for (ValueType param : type.params()) {
-                slots.add(slot);
-                slot += slotCount(param);
-            }
+        for (ValueType param : paramTypes) {
+            slots.add(slot);
+            slot += slotCount(param);
         }
 
         // context argument
@@ -122,7 +121,7 @@ final class AotContext {
         return huge;
     }
 
-    public int getId() {
+    public int funcId() {
         return funcId;
     }
 
@@ -203,6 +202,10 @@ final class AotContext {
     }
 
     public void exitScope(Instruction scope) {
+        //        System.out.println(
+        //                String.format(
+        //                        "RESTORE: %s => %s",
+        //                        stackSizesStack.getFirst(), restoreStackSize.getFirst()));
         scopeStackSize.remove(scope);
         restoreStackSize.pop();
     }
@@ -214,5 +217,24 @@ final class AotContext {
     public void scopeRestoreStackSize() {
         stackSizesStack.pop();
         stackSizesStack.push(restoreStackSize.getFirst());
+    }
+
+    public AotContext copyForInner(List<ValueType> paramTypes) {
+        var ctx =
+                new AotContext(
+                        internalClassName,
+                        internalContextClassName,
+                        globalTypes,
+                        functionTypes,
+                        types,
+                        paramTypes,
+                        huge,
+                        funcId,
+                        type,
+                        body);
+        for (ValueType param : paramTypes) {
+            ctx.pushStackSize(stackSize(jvmType(param)));
+        }
+        return ctx;
     }
 }

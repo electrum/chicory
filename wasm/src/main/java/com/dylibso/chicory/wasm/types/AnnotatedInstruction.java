@@ -70,6 +70,10 @@ public final class AnnotatedInstruction extends Instruction {
                 + '}';
     }
 
+    public Instruction asInstruction() {
+        return new Instruction(address(), opcode(), operands());
+    }
+
     public static Builder builder() {
         return new Builder();
     }
