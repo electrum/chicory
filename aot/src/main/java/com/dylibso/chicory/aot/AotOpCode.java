@@ -7,7 +7,7 @@ import java.util.Optional;
 
 enum AotOpCode {
     LABEL,
-    DROP_KEEP,
+    UNWIND,
     TRAP,
     GOTO,
     IFEQ,

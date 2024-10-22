@@ -1,25 +1,29 @@
 package com.dylibso.chicory.aot;
 
+import static java.util.Objects.requireNonNull;
+
+import com.dylibso.chicory.wasm.types.ValueType;
 import java.util.Arrays;
+import java.util.List;
 import java.util.stream.LongStream;
 
 final class AotInstruction {
-    public static final long[] EMPTY = new long[0];
+    private static final long[] EMPTY = new long[0];
 
     private final AotOpCode opcode;
     private final long[] operands;
+    private final List<ValueType> stack;
+    private final int minStack;
 
-    public AotInstruction(AotOpCode opcode) {
-        this(opcode, EMPTY);
+    public AotInstruction(AotOpCode opcode, long operand, List<ValueType> stack, int minStack) {
+        this(opcode, new long[] {operand}, stack, minStack);
     }
 
-    public AotInstruction(AotOpCode opcode, long operand) {
-        this(opcode, new long[] {operand});
-    }
-
-    public AotInstruction(AotOpCode opcode, long[] operands) {
-        this.opcode = opcode;
+    public AotInstruction(AotOpCode opcode, long[] operands, List<ValueType> stack, int minStack) {
+        this.opcode = requireNonNull(opcode);
         this.operands = operands;
+        this.stack = List.copyOf(stack);
+        this.minStack = minStack;
     }
 
     public AotOpCode opcode() {
@@ -36,6 +40,14 @@ final class AotInstruction {
 
     public long operand(int index) {
         return operands[index];
+    }
+
+    public List<ValueType> stack() {
+        return stack;
+    }
+
+    public int minStack() {
+        return minStack;
     }
 
     @Override

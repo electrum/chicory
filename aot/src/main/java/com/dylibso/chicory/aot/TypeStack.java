@@ -1,6 +1,7 @@
 package com.dylibso.chicory.aot;
 
 import static com.dylibso.chicory.wasm.types.Instruction.EMPTY_OPERANDS;
+import static java.lang.Math.min;
 
 import com.dylibso.chicory.wasm.types.FunctionType;
 import com.dylibso.chicory.wasm.types.Instruction;
@@ -19,9 +20,15 @@ final class TypeStack {
     private final Deque<Deque<ValueType>> types = new ArrayDeque<>();
     private final Deque<Deque<ValueType>> restore = new ArrayDeque<>();
     private final Map<Instruction, Integer> scopes = new HashMap<>();
+    private int minSize;
 
     public TypeStack() {
         this.types.push(new ArrayDeque<>());
+    }
+
+    private TypeStack(TypeStack other) {
+        this.types.push(new ArrayDeque<>(other.types()));
+        this.minSize = other.minSize;
     }
 
     public ValueType peek() {
@@ -37,6 +44,7 @@ final class TypeStack {
         if (expected != actual) {
             throw new IllegalArgumentException("Expected type " + expected + " <> " + actual);
         }
+        minSize = min(minSize, types().size());
     }
 
     public void popRef() {
@@ -44,6 +52,24 @@ final class TypeStack {
         if (actual != ValueType.FuncRef && actual != ValueType.ExternRef) {
             throw new IllegalArgumentException("Expected reference type <> " + actual);
         }
+        minSize = min(minSize, types().size());
+    }
+
+    public TypeStack unwind(int drop, int keep) {
+        TypeStack unwind = new TypeStack(this);
+        Deque<ValueType> stack = new ArrayDeque<>();
+        for (int i = 0; i < keep; i++) {
+            var type = unwind.peek();
+            unwind.pop(type);
+            stack.push(type);
+        }
+        for (int i = 0; i < drop; i++) {
+            unwind.pop(unwind.peek());
+        }
+        while (!stack.isEmpty()) {
+            unwind.push(stack.pop());
+        }
+        return unwind;
     }
 
     public void pushTypes() {
@@ -93,5 +119,13 @@ final class TypeStack {
         if (!types().isEmpty()) {
             throw new RuntimeException("Types not empty: " + types());
         }
+    }
+
+    public void resetMinSize() {
+        minSize = types().size();
+    }
+
+    public int minSize() {
+        return minSize;
     }
 }

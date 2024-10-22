@@ -8,7 +8,7 @@ final class AotEmitterMap {
     public static final Map<AotOpCode, AotEmitters.BytecodeEmitter> EMITTERS =
             AotEmitters.builder()
                     // ====== Misc ======
-                    .intrinsic(AotOpCode.DROP_KEEP, AotEmitters::DROP_KEEP)
+                    .intrinsic(AotOpCode.UNWIND, AotEmitters::UNWIND)
                     .intrinsic(AotOpCode.TRAP, AotEmitters::TRAP)
                     .intrinsic(AotOpCode.RETURN, AotEmitters::RETURN)
                     .intrinsic(AotOpCode.DROP, AotEmitters::DROP)

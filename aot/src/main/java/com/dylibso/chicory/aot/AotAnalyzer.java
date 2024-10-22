@@ -81,10 +81,6 @@ final class AotAnalyzer {
         for (int idx = 0; idx < body.instructions().size(); idx++) {
             AnnotatedInstruction ins = body.instructions().get(idx);
 
-            if (labels.contains(idx)) {
-                result.add(new AotInstruction(AotOpCode.LABEL, idx));
-            }
-
             // skip instructions after unconditional control transfer
             if (exitBlockDepth >= 0) {
                 if (ins.depth() > exitBlockDepth
@@ -98,12 +94,17 @@ final class AotAnalyzer {
                 }
             }
 
+            stack.resetMinSize();
+            if (labels.contains(idx)) {
+                result.add(instruction(AotOpCode.LABEL, idx, stack));
+            }
+
             switch (ins.opcode()) {
                 case NOP:
                     break;
                 case UNREACHABLE:
                     exitBlockDepth = ins.depth();
-                    result.add(new AotInstruction(AotOpCode.TRAP));
+                    result.add(instruction(AotOpCode.TRAP, new long[0], stack));
                     break;
                 case BLOCK:
                 case LOOP:
@@ -117,7 +118,7 @@ final class AotAnalyzer {
                     for (var type : reversed(functionType.returns())) {
                         stack.pop(type);
                     }
-                    result.add(new AotInstruction(AotOpCode.RETURN, ids(functionType.returns())));
+                    result.add(instruction(AotOpCode.RETURN, ids(functionType.returns()), stack));
                     break;
                 case IF:
                     stack.pop(ValueType.I32);
@@ -126,27 +127,33 @@ final class AotAnalyzer {
                     if (body.instructions().get(ins.labelFalse() - 1).opcode() == OpCode.ELSE) {
                         stack.pushTypes();
                     }
-                    result.add(new AotInstruction(AotOpCode.IFEQ, ins.labelFalse()));
+                    result.add(instruction(AotOpCode.IFEQ, ins.labelFalse(), stack));
                     break;
                 case ELSE:
                     stack.popTypes();
-                    result.add(new AotInstruction(AotOpCode.GOTO, ins.labelTrue()));
+                    result.add(instruction(AotOpCode.GOTO, ins.labelTrue(), stack));
                     break;
                 case BR:
                     exitBlockDepth = ins.depth();
-                    unwindStack(functionType, body, ins, ins.labelTrue(), stack)
-                            .ifPresent(result::add);
-                    result.add(new AotInstruction(AotOpCode.GOTO, ins.labelTrue()));
+                    var brUnwind = unwindStack(functionType, body, ins, ins.labelTrue(), stack);
+                    if (brUnwind.isPresent()) {
+                        var unwind = brUnwind.get();
+                        result.add(unwind.instruction());
+                        result.add(instruction(AotOpCode.GOTO, ins.labelTrue(), unwind.stack()));
+                    } else {
+                        result.add(instruction(AotOpCode.GOTO, ins.labelTrue(), stack));
+                    }
                     break;
                 case BR_IF:
                     stack.pop(ValueType.I32);
                     var ifUnwind = unwindStack(functionType, body, ins, ins.labelTrue(), stack);
                     if (ifUnwind.isPresent()) {
-                        result.add(new AotInstruction(AotOpCode.IFEQ, ins.labelFalse()));
-                        result.add(ifUnwind.get());
-                        result.add(new AotInstruction(AotOpCode.GOTO, ins.labelTrue()));
+                        var unwind = ifUnwind.get();
+                        result.add(instruction(AotOpCode.IFEQ, ins.labelFalse(), stack));
+                        result.add(unwind.instruction());
+                        result.add(instruction(AotOpCode.GOTO, ins.labelTrue(), unwind.stack()));
                     } else {
-                        result.add(new AotInstruction(AotOpCode.IFNE, ins.labelTrue()));
+                        result.add(instruction(AotOpCode.IFNE, ins.labelTrue(), stack));
                     }
                     break;
                 case BR_TABLE:
@@ -154,10 +161,16 @@ final class AotAnalyzer {
                     stack.pop(ValueType.I32);
                     // convert to jump if it only has a default
                     if (ins.labelTable().size() == 1) {
-                        result.add(new AotInstruction(AotOpCode.DROP, ValueType.I32.id()));
-                        unwindStack(functionType, body, ins, ins.labelTable().get(0), stack)
-                                .ifPresent(result::add);
-                        result.add(new AotInstruction(AotOpCode.GOTO, ins.labelTable().get(0)));
+                        int label = ins.labelTable().get(0);
+                        result.add(instruction(AotOpCode.DROP, ValueType.I32.id(), stack));
+                        var tryUnwind = unwindStack(functionType, body, ins, label, stack);
+                        if (tryUnwind.isPresent()) {
+                            var unwind = tryUnwind.get();
+                            result.add(unwind.instruction());
+                            result.add(instruction(AotOpCode.GOTO, label, unwind.stack()));
+                        } else {
+                            result.add(instruction(AotOpCode.GOTO, label, stack));
+                        }
                         break;
                     }
                     // extract unique targets and generate unwind for each
@@ -166,19 +179,20 @@ final class AotAnalyzer {
                     for (var target : ins.labelTable()) {
                         if (!targets.containsKey(target)) {
                             int label = target;
-                            var unwind = unwindStack(functionType, body, ins, target, stack);
-                            if (unwind.isPresent()) {
+                            var tryUnwind = unwindStack(functionType, body, ins, target, stack);
+                            if (tryUnwind.isPresent()) {
+                                var unwind = tryUnwind.get();
                                 label = nextLabel;
                                 nextLabel++;
-                                unwinds.add(new AotInstruction(AotOpCode.LABEL, label));
-                                unwinds.add(unwind.get());
-                                unwinds.add(new AotInstruction(AotOpCode.GOTO, target));
+                                unwinds.add(instruction(AotOpCode.LABEL, label, stack));
+                                unwinds.add(unwind.instruction());
+                                unwinds.add(instruction(AotOpCode.GOTO, target, unwind.stack()));
                             }
                             targets.put(target, label);
                         }
                     }
                     long[] operands = ins.labelTable().stream().mapToLong(targets::get).toArray();
-                    result.add(new AotInstruction(AotOpCode.SWITCH, operands));
+                    result.add(instruction(AotOpCode.SWITCH, operands, stack));
                     result.addAll(unwinds);
                     break;
                 case SELECT:
@@ -189,13 +203,13 @@ final class AotAnalyzer {
                     stack.pop(selectType);
                     stack.pop(selectType);
                     stack.push(selectType);
-                    result.add(new AotInstruction(AotOpCode.SELECT, selectType.id()));
+                    result.add(instruction(AotOpCode.SELECT, selectType.id(), stack));
                     break;
                 case DROP:
                     // [t] -> []
                     var dropType = stack.peek();
                     stack.pop(dropType);
-                    result.add(new AotInstruction(AotOpCode.DROP, dropType.id()));
+                    result.add(instruction(AotOpCode.DROP, dropType.id(), stack));
                     break;
                 case LOCAL_TEE:
                     // [t] -> [t]
@@ -203,10 +217,10 @@ final class AotAnalyzer {
                     stack.pop(teeType);
                     stack.push(teeType);
                     long[] teeOperands = {ins.operand(0), teeType.id()};
-                    result.add(new AotInstruction(AotOpCode.LOCAL_TEE, teeOperands));
+                    result.add(instruction(AotOpCode.LOCAL_TEE, teeOperands, stack));
                     break;
                 default:
-                    analyzeSimple(result, stack, ins, functionType, body);
+                    result.add(analyzeSimple(stack, ins, functionType, body));
             }
         }
 
@@ -214,18 +228,14 @@ final class AotAnalyzer {
         for (var type : reversed(functionType.returns())) {
             stack.pop(type);
         }
-        result.add(new AotInstruction(AotOpCode.RETURN, ids(functionType.returns())));
+        result.add(instruction(AotOpCode.RETURN, ids(functionType.returns()), stack));
 
         stack.verifyEmpty();
         return result;
     }
 
-    private void analyzeSimple(
-            List<AotInstruction> out,
-            TypeStack stack,
-            Instruction ins,
-            FunctionType functionType,
-            FunctionBody body) {
+    private AotInstruction analyzeSimple(
+            TypeStack stack, Instruction ins, FunctionType functionType, FunctionBody body) {
         switch (ins.opcode()) {
             case I32_CLZ:
             case I32_CTZ:
@@ -594,7 +604,15 @@ final class AotAnalyzer {
             default:
                 throw new ChicoryException("Unhandled opcode: " + ins.opcode());
         }
-        out.add(new AotInstruction(AotOpCode.of(ins.opcode()), ins.operands()));
+        return instruction(AotOpCode.of(ins.opcode()), ins.operands(), stack);
+    }
+
+    private static AotInstruction instruction(AotOpCode opcode, long operand, TypeStack stack) {
+        return new AotInstruction(opcode, operand, List.copyOf(stack.types()), stack.minSize());
+    }
+
+    private static AotInstruction instruction(AotOpCode opcode, long[] operands, TypeStack stack) {
+        return new AotInstruction(opcode, operands, List.copyOf(stack.types()), stack.minSize());
     }
 
     private static void updateStack(TypeStack stack, FunctionType functionType) {
@@ -606,7 +624,7 @@ final class AotAnalyzer {
         }
     }
 
-    private Optional<AotInstruction> unwindStack(
+    private Optional<Unwind> unwindStack(
             FunctionType functionType,
             FunctionBody body,
             AnnotatedInstruction ins,
@@ -655,7 +673,9 @@ final class AotAnalyzer {
         reverse(dropKeepTypes);
         dropKeepTypes.stream().mapToLong(ValueType::id).forEach(operands::add);
 
-        return Optional.of(new AotInstruction(AotOpCode.DROP_KEEP, operands.build().toArray()));
+        var unwind = stack.unwind(drop, keep);
+        var result = instruction(AotOpCode.UNWIND, operands.build().toArray(), unwind);
+        return Optional.of(new Unwind(result, unwind));
     }
 
     private FunctionType blockType(Instruction ins) {
@@ -727,5 +747,23 @@ final class AotAnalyzer {
 
     private static long[] ids(List<ValueType> types) {
         return types.stream().mapToLong(ValueType::id).toArray();
+    }
+
+    private static final class Unwind {
+        private final AotInstruction instruction;
+        private final TypeStack stack;
+
+        private Unwind(AotInstruction instruction, TypeStack stack) {
+            this.instruction = instruction;
+            this.stack = stack;
+        }
+
+        public AotInstruction instruction() {
+            return instruction;
+        }
+
+        public TypeStack stack() {
+            return stack;
+        }
     }
 }

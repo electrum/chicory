@@ -101,7 +101,7 @@ final class AotEmitters {
         asm.visitInsn(Opcodes.ATHROW);
     }
 
-    public static void DROP_KEEP(AotContext ctx, AotInstruction ins, MethodVisitor asm) {
+    public static void UNWIND(AotContext ctx, AotInstruction ins, MethodVisitor asm) {
         int keepStart = (int) ins.operand(0) + 1;
 
         // save result values
