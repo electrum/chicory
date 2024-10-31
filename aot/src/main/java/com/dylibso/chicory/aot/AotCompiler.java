@@ -618,57 +618,66 @@ public final class AotCompiler {
 
         // compile the function body
         for (AotInstruction ins : instructions) {
-            switch (ins.opcode()) {
-                case LABEL:
-                    Label label = labels.get(ins.operand(0));
-                    if (label != null) {
-                        asm.visitLabel(label);
-                        visitedTargets.add(ins.operand(0));
-                    }
-                    break;
-                case GOTO:
-                    if (visitedTargets.contains(ins.operand(0))) {
-                        emitInvokeStatic(asm, CHECK_INTERRUPTION);
-                    }
-                    asm.visitJumpInsn(Opcodes.GOTO, labels.get(ins.operand(0)));
-                    break;
-                case IFEQ:
-                    if (visitedTargets.contains(ins.operand(0))) {
-                        throw new ChicoryException("Unexpected backward jump");
-                    }
-                    asm.visitJumpInsn(Opcodes.IFEQ, labels.get(ins.operand(0)));
-                    break;
-                case IFNE:
-                    if (visitedTargets.contains(ins.operand(0))) {
-                        Label skip = new Label();
-                        asm.visitJumpInsn(Opcodes.IFEQ, skip);
-                        emitInvokeStatic(asm, CHECK_INTERRUPTION);
-                        asm.visitJumpInsn(Opcodes.GOTO, labels.get(ins.operand(0)));
-                        asm.visitLabel(skip);
+            emitInstruction(ctx, ins, labels, visitedTargets, asm);
+        }
+    }
 
-                    } else {
-                        asm.visitJumpInsn(Opcodes.IFNE, labels.get(ins.operand(0)));
-                    }
-                    break;
-                case SWITCH:
-                    if (ins.operands().anyMatch(visitedTargets::contains)) {
-                        emitInvokeStatic(asm, CHECK_INTERRUPTION);
-                    }
-                    // table switch using the last entry of the table as the default
-                    Label[] table = new Label[ins.operandCount() - 1];
-                    for (int i = 0; i < table.length; i++) {
-                        table[i] = labels.get(ins.operand(i));
-                    }
-                    Label defaultLabel = labels.get(ins.operand(table.length));
-                    asm.visitTableSwitchInsn(0, table.length - 1, defaultLabel, table);
-                    break;
-                default:
-                    var emitter = EMITTERS.get(ins.opcode());
-                    if (emitter == null) {
-                        throw new ChicoryException("Unhandled opcode: " + ins.opcode());
-                    }
-                    emitter.emit(ctx, ins, asm);
-            }
+    private static void emitInstruction(
+            AotContext ctx,
+            AotInstruction ins,
+            Map<Long, Label> labels,
+            Set<Long> visitedTargets,
+            MethodVisitor asm) {
+
+        switch (ins.opcode()) {
+            case LABEL:
+                Label label = labels.get(ins.operand(0));
+                if (label != null) {
+                    asm.visitLabel(label);
+                    visitedTargets.add(ins.operand(0));
+                }
+                break;
+            case GOTO:
+                if (visitedTargets.contains(ins.operand(0))) {
+                    emitInvokeStatic(asm, CHECK_INTERRUPTION);
+                }
+                asm.visitJumpInsn(Opcodes.GOTO, labels.get(ins.operand(0)));
+                break;
+            case IFEQ:
+                if (visitedTargets.contains(ins.operand(0))) {
+                    throw new ChicoryException("Unexpected backward jump");
+                }
+                asm.visitJumpInsn(Opcodes.IFEQ, labels.get(ins.operand(0)));
+                break;
+            case IFNE:
+                if (visitedTargets.contains(ins.operand(0))) {
+                    Label skip = new Label();
+                    asm.visitJumpInsn(Opcodes.IFEQ, skip);
+                    emitInvokeStatic(asm, CHECK_INTERRUPTION);
+                    asm.visitJumpInsn(Opcodes.GOTO, labels.get(ins.operand(0)));
+                    asm.visitLabel(skip);
+                } else {
+                    asm.visitJumpInsn(Opcodes.IFNE, labels.get(ins.operand(0)));
+                }
+                break;
+            case SWITCH:
+                if (ins.operands().anyMatch(visitedTargets::contains)) {
+                    emitInvokeStatic(asm, CHECK_INTERRUPTION);
+                }
+                // table switch using the last entry of the table as the default
+                Label[] table = new Label[ins.operandCount() - 1];
+                for (int i = 0; i < table.length; i++) {
+                    table[i] = labels.get(ins.operand(i));
+                }
+                Label defaultLabel = labels.get(ins.operand(table.length));
+                asm.visitTableSwitchInsn(0, table.length - 1, defaultLabel, table);
+                break;
+            default:
+                var emitter = EMITTERS.get(ins.opcode());
+                if (emitter == null) {
+                    throw new ChicoryException("Unhandled opcode: " + ins.opcode());
+                }
+                emitter.emit(ctx, ins, asm);
         }
     }
 
