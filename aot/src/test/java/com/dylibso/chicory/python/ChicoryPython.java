@@ -19,11 +19,11 @@ import java.nio.file.Path;
 import java.util.List;
 
 public final class ChicoryPython {
-    private static final File PYTHON_ROOT = new File("/Users/dphillips/tmp/cpython");
+    private static final File PYTHON_ROOT = new File("/Users/dphillips/tmp/Python-3.13.0");
     private static final File PYTHON_WASM =
             new File(PYTHON_ROOT, "cross-build/wasm32-wasi/python.wasm");
     private static final String PYTHON_PATH =
-            "/cross-build/wasm32-wasi/build/lib.wasi-wasm32-3.13-pydebug";
+            "/cross-build/wasm32-wasi/build/lib.wasi-wasm32-3.13";
     private static final String HELLO_WORLD = "print('Hello, World!')";
 
     //    private static final String PRETTY_PRINT =

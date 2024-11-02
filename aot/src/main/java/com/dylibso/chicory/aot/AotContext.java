@@ -34,6 +34,7 @@ final class AotContext {
             List<ValueType> globalTypes,
             List<FunctionType> functionTypes,
             FunctionType[] types,
+            List<ValueType> paramTypes,
             boolean huge,
             int funcId,
             FunctionType type,
@@ -53,11 +54,9 @@ final class AotContext {
         int slot = 0;
 
         // WASM arguments
-        if (!huge) {
-            for (ValueType param : type.params()) {
-                slots.add(slot);
-                slot += slotCount(param);
-            }
+        for (ValueType param : paramTypes) {
+            slots.add(slot);
+            slot += slotCount(param);
         }
 
         // context argument
@@ -140,5 +139,19 @@ final class AotContext {
 
     public int tempSlot() {
         return tempSlot;
+    }
+
+    public AotContext copyForInner(List<ValueType> paramTypes) {
+        return new AotContext(
+                internalClassName,
+                internalContextClassName,
+                globalTypes,
+                functionTypes,
+                types,
+                paramTypes,
+                huge,
+                funcId,
+                type,
+                body);
     }
 }

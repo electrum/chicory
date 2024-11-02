@@ -34,10 +34,14 @@ import static com.dylibso.chicory.aot.AotUtil.slotCount;
 import static com.dylibso.chicory.aot.AotUtil.storeTypeOpcode;
 import static com.dylibso.chicory.aot.AotUtil.valueMethodName;
 import static com.dylibso.chicory.aot.AotUtil.valueMethodType;
+import static com.dylibso.chicory.aot.MethodSplitter.computeSplits;
 import static java.lang.invoke.MethodHandleProxies.asInterfaceInstance;
 import static java.lang.invoke.MethodHandles.publicLookup;
 import static java.lang.invoke.MethodType.methodType;
 import static java.util.Objects.requireNonNull;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toMap;
 import static java.util.stream.Collectors.toSet;
 import static org.objectweb.asm.Type.VOID_TYPE;
 import static org.objectweb.asm.Type.getDescriptor;
@@ -46,6 +50,8 @@ import static org.objectweb.asm.Type.getMethodDescriptor;
 import static org.objectweb.asm.Type.getObjectType;
 import static org.objectweb.asm.Type.getType;
 
+import com.dylibso.chicory.aot.MethodSplitter.ResultType;
+import com.dylibso.chicory.aot.MethodSplitter.Split;
 import com.dylibso.chicory.runtime.Instance;
 import com.dylibso.chicory.runtime.Machine;
 import com.dylibso.chicory.runtime.Memory;
@@ -65,6 +71,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -75,10 +82,23 @@ import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodTooLargeException;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.commons.InstructionAdapter;
 import org.objectweb.asm.util.CheckClassAdapter;
 
 public final class AotCompiler {
+
+    private static boolean isDebugFunction(int funcId) {
+        // return false;
+        // return true;
+        // return funcId == 12;
+        // return funcId != 15;
+        // return funcId == 62;
+        // return false;
+        // return funcId == 3777;
+        // return funcId == 10;
+        return false;
+    }
 
     /**
      * By default, HotSpot does not compile methods that are over 8000 bytes.
@@ -186,7 +206,8 @@ public final class AotCompiler {
             var type = functionTypes.get(funcId);
             var body = module.codeSection().getFunctionBody(i);
 
-            if (body.instructions().size() >= hugeMethodSize) {
+            if ((body.instructions().size() >= hugeMethodSize && type.returns().size() <= 1)
+                    || isDebugFunction(funcId)) {
                 var name = contextClassName(funcId);
                 var bytes = compileContextClass(name, type, body);
                 loadExtraClass(classes, bytes);
@@ -238,6 +259,12 @@ public final class AotCompiler {
         ClassWriter binaryWriter = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
         ClassVisitor classWriter = aotMethodsRemapper(binaryWriter, className);
         classWriter = new CheckClassAdapter(classWriter, true);
+
+//        var printer = new PrintWriter(OutputStream.nullOutputStream());
+//        var textifier = new CustomTextifier();
+//        classWriter = new TraceClassVisitor(classWriter, textifier, printer);
+
+        var finalClassWriter = classWriter;
 
         classWriter.visit(
                 Opcodes.V11,
@@ -306,7 +333,8 @@ public final class AotCompiler {
             var type = functionTypes.get(funcId);
             var body = module.codeSection().getFunctionBody(i);
 
-            if (body.instructions().size() >= hugeMethodSize) {
+            if ((body.instructions().size() >= hugeMethodSize && type.returns().size() <= 1)
+                    || isDebugFunction(funcId)) {
                 emitFunction(
                         classWriter,
                         methodNameFor(funcId),
@@ -318,7 +346,7 @@ public final class AotCompiler {
                         hugeOuterMethodName(funcId),
                         hugeOuterMethodDescriptor(internalContextClassName(funcId), type),
                         true,
-                        asm -> compileHugeOuter(funcId, type, body, asm));
+                        asm -> compileHugeOuter(funcId, type, body, finalClassWriter, asm));
             } else {
                 emitFunction(
                         classWriter,
@@ -453,7 +481,7 @@ public final class AotCompiler {
         // switch (funcId)
         Label defaultLabel = new Label();
         Label hostLabel = new Label();
-        Label[] labels = new Label[functionTypes.size()];
+        Label[] labels = new Label[Math.min(functionTypes.size(), 1100)];
 
         for (int i = 0; i < labels.length; i++) {
             labels[i] = (i < functionImports) ? hostLabel : new Label();
@@ -704,7 +732,11 @@ public final class AotCompiler {
     }
 
     private void compileHugeOuter(
-            int funcId, FunctionType type, FunctionBody body, MethodVisitor asm) {
+            int funcId,
+            FunctionType type,
+            FunctionBody body,
+            ClassVisitor classWriter,
+            MethodVisitor asm) {
         var ctx =
                 new AotContext(
                         internalClassName(className),
@@ -712,12 +744,42 @@ public final class AotCompiler {
                         analyzer.globalTypes(),
                         functionTypes,
                         module.typeSection().types(),
+                        List.of(),
                         true,
                         funcId,
                         type,
                         body);
 
-        compileBody(ctx, asm);
+        List<AotInstruction> instructions = analyzer.analyze(ctx.funcId());
+
+        List<Split> splits = List.of();
+        if (isDebugFunction(funcId)) {
+            // printMethod(ctx, instructions);
+            System.out.println("func_" + funcId + " " + type);
+            splits = computeSplits(instructions);
+
+            splits = splits.stream()
+                    .filter(split -> split.end() - split.start() >= 50)
+                    .collect(toList());
+            System.out.println("SPLIT COUNT: " + splits.size());
+            for (Split split : splits) {
+                System.out.println("SPLIT SIZE: " + (split.end() - split.start()));
+            }
+        }
+
+        compileBody(ctx, type, splits, classWriter, asm);
+    }
+
+    static void printMethod(AotContext ctx, List<AotInstruction> instructions) {
+        System.out.println("[IR " + ctx.funcId() + "]");
+        for (var ins : instructions) {
+            printInstruction(ins);
+        }
+        System.out.println();
+    }
+
+    static void printInstruction(AotInstruction ins) {
+        // System.out.printf("  %-20s << %s %s%n", ins, ins.minStack(), ins.stack());
     }
 
     private void compileBody(int funcId, FunctionType type, FunctionBody body, MethodVisitor asm) {
@@ -728,6 +790,7 @@ public final class AotCompiler {
                         analyzer.globalTypes(),
                         functionTypes,
                         module.typeSection().types(),
+                        type.params(),
                         false,
                         funcId,
                         type,
@@ -741,12 +804,23 @@ public final class AotCompiler {
             asm.visitVarInsn(storeTypeOpcode(localType), ctx.localSlotIndex(i));
         }
 
-        compileBody(ctx, asm);
+        compileBody(ctx, type, List.of(), null, asm);
     }
 
-    private void compileBody(AotContext ctx, MethodVisitor asm) {
+    @SuppressWarnings("checkstyle:modifiedcontrolvariable")
+    private void compileBody(
+            AotContext ctx,
+            FunctionType type,
+            List<Split> splits,
+            ClassVisitor classWriter,
+            MethodVisitor asm) {
 
         List<AotInstruction> instructions = analyzer.analyze(ctx.funcId());
+        if (isDebugFunction(ctx.funcId()) && !ctx.huge()) {
+            // printMethod(ctx, instructions);
+        }
+
+        var splitStarts = splits.stream().collect(toMap(Split::start, identity()));
 
         // allocate labels for all label targets
         Map<Long, Label> labels = new HashMap<>();
@@ -760,7 +834,101 @@ public final class AotCompiler {
         Set<Long> visitedTargets = new HashSet<>();
 
         // compile the function body
-        for (AotInstruction ins : instructions) {
+        for (int idx = 0; idx < instructions.size(); idx++) {
+            var ins = instructions.get(idx);
+            if (isDebugFunction(ctx.funcId())) {
+                // printInstruction(ins);
+            }
+
+            // compile inner method if this is the start of a split
+            if (splitStarts.containsKey(idx)) {
+                Split split = splitStarts.get(idx);
+
+                // emit label
+                emitInstruction(ctx, ins, labels, visitedTargets, asm);
+
+                // generate inner method
+                System.out.println();
+                System.out.println(">>>>> INNER >>>>>");
+                System.out.println(split);
+                AotContext innerCtx = ctx.copyForInner(split.params());
+                emitFunction(
+                        classWriter,
+                        hugeInnerMethodName(ctx.funcId(), split),
+                        hugeInnerMethodDescriptor(internalContextClassName(ctx.funcId()), split),
+                        true,
+                        methodWriter ->
+                                compileHugeInnerBody(
+                                        innerCtx, type, instructions, split, methodWriter));
+                System.out.println("<<<<<<<<<<<<<<<<<");
+                System.out.println();
+
+                // invoke inner method
+                asm.visitVarInsn(Opcodes.ALOAD, ctx.contextSlot());
+                asm.visitVarInsn(Opcodes.ALOAD, ctx.memorySlot());
+                asm.visitVarInsn(Opcodes.ALOAD, ctx.instanceSlot());
+                asm.visitMethodInsn(
+                        Opcodes.INVOKESTATIC,
+                        ctx.internalClassName(),
+                        hugeInnerMethodName(ctx.funcId(), split),
+                        hugeInnerMethodDescriptor(internalContextClassName(ctx.funcId()), split),
+                        false);
+
+                // TODO: special case single result and use default for first entry in table
+                // generate a table switch to handle results
+                Label[] resultLabels = new Label[split.results().size()];
+                for (int i = 0; i < split.results().size(); i++) {
+                    var result = split.results().get(i);
+                    if (result.type() == ResultType.GOTO && result.types().isEmpty()) {
+                        resultLabels[i] = labels.get(result.target());
+                    } else {
+                        resultLabels[i] = new Label();
+                    }
+                }
+                asm.visitInsn(Opcodes.DUP);
+                asm.visitVarInsn(Opcodes.ASTORE, ctx.tempSlot());
+                asm.visitLdcInsn(0);
+                asm.visitInsn(Opcodes.LALOAD);
+                asm.visitInsn(Opcodes.L2I);
+                asm.visitTableSwitchInsn(0, resultLabels.length - 1, resultLabels[0], resultLabels);
+
+                // generate result targets in reverse order so that continue is last
+                for (int i = split.results().size() - 1; i >= 0; i--) {
+                    var result = split.results().get(i);
+                    if (result.type() != ResultType.GOTO || !result.types().isEmpty()) {
+                        asm.visitLabel(resultLabels[i]);
+                        if (result.type() == ResultType.RETURN) {
+                            if (type.returns().isEmpty()) {
+                                asm.visitInsn(Opcodes.RETURN);
+                            } else {
+                                if (type.returns().size() > 1) {
+                                    throw new ChicoryException("Multi-value return not supported");
+                                }
+                                asm.visitVarInsn(Opcodes.ALOAD, ctx.tempSlot());
+                                asm.visitLdcInsn(1);
+                                asm.visitInsn(Opcodes.LALOAD);
+                                emitLongToJvm(asm, type.returns().get(0));
+                                asm.visitInsn(returnTypeOpcode(type));
+                            }
+                        } else {
+                            // push the produced values onto the stack
+                            for (int j = 0; j < result.types().size(); j++) {
+                                asm.visitVarInsn(Opcodes.ALOAD, ctx.tempSlot());
+                                asm.visitLdcInsn(j + 1);
+                                asm.visitInsn(Opcodes.LALOAD);
+                                emitLongToJvm(asm, result.types().get(j));
+                            }
+                            if (result.type() == ResultType.GOTO) {
+                                asm.visitJumpInsn(Opcodes.GOTO, labels.get(result.target()));
+                            }
+                        }
+                    }
+                }
+
+                idx = split.end() - 1;
+                continue;
+            }
+
             emitInstruction(ctx, ins, labels, visitedTargets, asm);
         }
     }
@@ -824,6 +992,128 @@ public final class AotCompiler {
         }
     }
 
+    private static void compileHugeInnerBody(
+            AotContext ctx,
+            FunctionType type,
+            List<AotInstruction> instructions,
+            Split split,
+            MethodVisitor asm) {
+
+        // push parameters onto the stack
+        for (int i = 0; i < split.params().size(); i++) {
+            var param = split.params().get(i);
+            asm.visitVarInsn(loadTypeOpcode(param), ctx.localSlotIndex(i));
+        }
+
+        // range of instructions to compile
+        int startIdx = split.start();
+        int endIdx = split.end();
+
+        // allocate labels for all label targets
+        Map<Long, Label> labels = new HashMap<>();
+        for (int idx = startIdx; idx < endIdx; idx++) {
+            for (long target : instructions.get(idx).labelTargets()) {
+                labels.put(target, new Label());
+                System.out.println("LABEL: " + target + " => " + labels.get(target));
+            }
+        }
+
+        // track targets to detect backward jumps
+        Set<Long> visitedTargets = new HashSet<>();
+
+        // find the return id
+        OptionalLong returnId = OptionalLong.empty();
+        for (int i = 0; i < split.results().size(); i++) {
+            if (split.results().get(i).type() == ResultType.RETURN) {
+                returnId = OptionalLong.of(i);
+                break;
+            }
+        }
+
+        // compile the function body
+        if (isDebugFunction(ctx.funcId())) {
+            System.out.println(hugeInnerMethodName(ctx.funcId(), split));
+        }
+        for (int idx = startIdx; idx < endIdx; idx++) {
+            var ins = instructions.get(idx);
+            if (isDebugFunction(ctx.funcId())) {
+                // printInstruction(ins);
+            }
+
+            if (ins.opcode() == AotOpCode.RETURN) {
+                // TODO: generate methods for these and handle multi-value returns
+                if (type.returns().isEmpty()) {
+                    asm.visitLdcInsn(1);
+                    asm.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_LONG);
+                    asm.visitInsn(Opcodes.DUP);
+                    asm.visitLdcInsn(0);
+                    asm.visitLdcInsn(returnId.orElseThrow());
+                    asm.visitInsn(Opcodes.LASTORE);
+                } else if (type.returns().size() == 1) {
+                    var returnType = type.returns().get(0);
+                    asm.visitVarInsn(storeTypeOpcode(returnType), ctx.tempSlot());
+                    asm.visitLdcInsn(2);
+                    asm.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_LONG);
+                    asm.visitInsn(Opcodes.DUP);
+                    asm.visitLdcInsn(0);
+                    asm.visitLdcInsn(returnId.orElseThrow());
+                    asm.visitInsn(Opcodes.LASTORE);
+                    asm.visitInsn(Opcodes.DUP);
+                    asm.visitLdcInsn(1);
+                    asm.visitVarInsn(loadTypeOpcode(returnType), ctx.tempSlot());
+                    emitJvmToLong(asm, returnType);
+                    asm.visitInsn(Opcodes.LASTORE);
+                } else {
+                    throw new ChicoryException("Multi-value return not supported");
+                }
+                asm.visitInsn(Opcodes.ARETURN);
+            } else {
+                emitInstruction(ctx, ins, labels, visitedTargets, asm);
+            }
+        }
+
+        // continue execution with produced values
+        if (split.results().get(0).type() == ResultType.CONTINUE) {
+            System.out.println("CONTINUE RESULT: " + split.results().get(0));
+            emitInnerResult(ctx, split, 0, asm);
+        }
+
+        // generate local targets for labels outside method
+        for (int i = 0; i < split.results().size(); i++) {
+            var result = split.results().get(i);
+            if (result.type() == ResultType.GOTO) {
+                System.out.println("GOTO RESULT: " + result);
+                asm.visitLabel(labels.get(result.target()));
+                emitInnerResult(ctx, split, i, asm);
+            }
+        }
+    }
+
+    private static void emitInnerResult(AotContext ctx, Split split, int idx, MethodVisitor asm) {
+        var types = split.results().get(idx).types();
+        int slot = ctx.tempSlot();
+        for (ValueType resultType : types) {
+            asm.visitVarInsn(storeTypeOpcode(resultType), slot);
+            slot += slotCount(resultType);
+        }
+        asm.visitLdcInsn(types.size() + 1);
+        asm.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_LONG);
+        asm.visitInsn(Opcodes.DUP);
+        asm.visitLdcInsn(0);
+        asm.visitLdcInsn((long) idx);
+        asm.visitInsn(Opcodes.LASTORE);
+        for (int i = 0; i < types.size(); i++) {
+            slot -= slotCount(types.get(i));
+            ValueType valueType = types.get(i);
+            asm.visitInsn(Opcodes.DUP);
+            asm.visitLdcInsn(i + 1);
+            asm.visitVarInsn(loadTypeOpcode(valueType), slot);
+            emitJvmToLong(asm, valueType);
+            asm.visitInsn(Opcodes.LASTORE);
+        }
+        asm.visitInsn(Opcodes.ARETURN);
+    }
+
     private String contextClassName(int funcId) {
         return className + "$Context" + funcId;
     }
@@ -843,6 +1133,21 @@ public final class AotCompiler {
                 getObjectType(internalContextClassName),
                 getType(Memory.class),
                 getType(Instance.class));
+    }
+
+    private static String hugeInnerMethodName(int funcId, Split split) {
+        return methodNameFor(funcId) + "_inner_" + split.start() + "_" + split.end();
+    }
+
+    private static String hugeInnerMethodDescriptor(String internalContextClassName, Split split) {
+        List<Type> parameters = new ArrayList<>(split.params().size() + 3);
+        for (var param : split.params()) {
+            parameters.add(getType(jvmType(param)));
+        }
+        parameters.add(getObjectType(internalContextClassName));
+        parameters.add(getType(Memory.class));
+        parameters.add(getType(Instance.class));
+        return getMethodDescriptor(getType(long[].class), parameters.toArray(new Type[0]));
     }
 
     private static String callMethodName(int functId) {

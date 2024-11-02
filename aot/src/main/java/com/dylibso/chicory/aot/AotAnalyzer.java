@@ -1,6 +1,7 @@
 package com.dylibso.chicory.aot;
 
 import static com.dylibso.chicory.aot.AotUtil.localType;
+import static com.dylibso.chicory.aot.AotUtil.reversed;
 import static com.dylibso.chicory.aot.TypeStack.FUNCTION_SCOPE;
 import static java.util.Collections.reverse;
 import static java.util.stream.Collectors.toCollection;
@@ -734,15 +735,6 @@ final class AotAnalyzer {
                         .map(Table::elementType);
 
         return Stream.concat(importedTables, moduleTables).collect(toUnmodifiableList());
-    }
-
-    private static <T> List<T> reversed(List<T> list) {
-        if (list.size() <= 1) {
-            return list;
-        }
-        List<T> reversed = new ArrayList<>(list);
-        reverse(reversed);
-        return reversed;
     }
 
     private static long[] ids(List<ValueType> types) {

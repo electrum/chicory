@@ -15,7 +15,6 @@ import com.dylibso.chicory.wasm.Parser;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.util.List;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 public class WasiPreview1Test {
@@ -68,7 +67,6 @@ public class WasiPreview1Test {
         assertEquals(fakeStdout.output().strip(), "Hello, Benjamin!");
     }
 
-    @Disabled
     @Test
     public void shouldRunWasiDemoJavyModule() {
         // check with: echo "{ \"n\": 2, \"bar\": \"baz\"}" | wasmtime
@@ -200,7 +198,6 @@ public class WasiPreview1Test {
         assertEquals("Hello, WebAssembly!\n", fakeStdout.output());
     }
 
-    @Disabled
     @Test
     public void shouldRunWasiDemoDotnetModule() throws Exception {
         var fakeStdout = new MockPrintStream();
